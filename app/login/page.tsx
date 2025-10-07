@@ -11,7 +11,12 @@ const [error, setError] = useState<string|null>(null);
 
 const sendMagic = async () => {
 setError(null);
-const { error } = await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.origin } });
+const origin = process.env.NEXT_PUBLIC_SITE_URL ?? window.location.origin;
+const { error } = await supabase.auth.signInWithOtp({
+  email,
+  options: { emailRedirectTo: origin }
+});
+
 if (error) setError(error.message); else setSent(true);
 };
 
