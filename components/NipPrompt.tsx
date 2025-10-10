@@ -2,7 +2,8 @@
 import React, { useState } from 'react';
 
 type NipPromptProps = {
-  onSubmit: (nip: string) => Promise<void>;
+  /** Debe devolver true si la marcación se registró; false si hubo error */
+  onSubmit: (nip: string) => Promise<boolean>;
   label?: string;
   disabled?: boolean;
 };
@@ -17,10 +18,10 @@ export default function NipPrompt({
 
   const submit = async () => {
     if (!nip || disabled || busy) return;
+    setBusy(true);
     try {
-      setBusy(true);
-      await onSubmit(nip);
-      setNip('');
+      const ok = await onSubmit(nip);
+      if (ok) setNip('');        // ← solo limpiamos si fue éxito
     } finally {
       setBusy(false);
     }
