@@ -9,28 +9,17 @@ const TZ = 'America/Mexico_City';
 
 function fmtDate(d: Date) {
   return d.toLocaleDateString('es-MX', {
-    weekday: 'long',
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-    timeZone: TZ,
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: TZ,
   });
 }
 function fmtClock(d: Date) {
   return d.toLocaleTimeString('es-MX', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    timeZone: TZ,
+    hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: TZ,
   });
 }
 function fmtTimeIso(iso: string) {
   const d = new Date(iso);
-  return d.toLocaleTimeString('es-MX', {
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZone: TZ,
-  });
+  return d.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', timeZone: TZ });
 }
 
 export default function EmpleadoPage() {
@@ -40,33 +29,25 @@ export default function EmpleadoPage() {
   const [todayTypes, setTodayTypes] = useState<BtnType[]>([]);
   const [times, setTimes] = useState<Partial<Record<BtnType, string>>>({});
   const [coords, setCoords] = useState<{ lat: number | null; lng: number | null; acc: number | null }>({
-    lat: null,
-    lng: null,
-    acc: null,
+    lat: null, lng: null, acc: null,
   });
 
+  // Reloj
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
 
+  // Carga inicial
   useEffect(() => {
     (async () => {
       const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        window.location.href = '/login';
-        return;
-      }
+      if (!session) { window.location.href = '/login'; return; }
 
-      // Perfil
       const { data: prof } = await supabase
-        .from('profiles')
-        .select('full_name')
-        .eq('id', session.user.id)
-        .maybeSingle();
+        .from('profiles').select('full_name').eq('id', session.user.id).maybeSingle();
       if (prof?.full_name) setFullName(prof.full_name);
 
-      // Geo
       if ('geolocation' in navigator) {
         navigator.geolocation.getCurrentPosition(
           (pos) => setCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy }),
@@ -75,67 +56,63 @@ export default function EmpleadoPage() {
         );
       }
 
-      // Punches de hoy
-      const todayLocal = new Date().toLocaleDateString('en-CA', { timeZone: TZ });
-      const { data } = await supabase
-        .from('punches')
-        .select('type, ts, workday')
-        .eq('workday', todayLocal);
-
-      const types = (data || []).map((r: any) => r.type as BtnType);
-      const tmap: Partial<Record<BtnType, string>> = {};
-      (data || []).forEach((r: any) => {
-        tmap[r.type as BtnType] = fmtTimeIso(r.ts);
-      });
-      setTodayTypes(types);
-      setTimes(tmap);
+      await loadToday(); // ← estado inicial del día
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const loadToday = async () => {
+    const todayLocal = new Date().toLocaleDateString('en-CA', { timeZone: TZ }); // YYYY-MM-DD
+    const { data, error } = await supabase
+      .from('punches')
+      .select('type, ts, workday')
+      .eq('workday', todayLocal);
+
+    if (error) return;
+    const list = (data || []) as Array<{ type: BtnType; ts: string }>;
+    setTodayTypes(list.map(r => r.type));
+    const tmap: Partial<Record<BtnType, string>> = {};
+    list.forEach(r => { tmap[r.type] = fmtTimeIso(r.ts); });
+    setTimes(tmap);
+  };
 
   const disabled = (t: BtnType) => {
     const has = (x: BtnType) => todayTypes.includes(x);
-    if (t === 'start_day') return has('start_day');
+    if (t === 'start_day')   return has('start_day');
     if (t === 'start_break') return !has('start_day') || has('start_break') || has('end_day');
-    if (t === 'end_break') return !has('start_day') || !has('start_break') || has('end_break') || has('end_day');
-    if (t === 'end_day') return !has('start_day') || has('end_day');
+    if (t === 'end_break')   return !has('start_day') || !has('start_break') || has('end_break') || has('end_day');
+    if (t === 'end_day')     return !has('start_day') || has('end_day');
     return false;
   };
 
-  const punch = async (type: BtnType, nip: string) => {
+  const punch = async (type: BtnType, nip: string): Promise<boolean> => {
     setMsg('');
     const device_id = getOrCreateDeviceId();
     const token = (await supabase.auth.getSession()).data.session?.access_token;
 
-    const payload = {
-      type,
-      nip,
-      lat: coords.lat,
-      lng: coords.lng,
-      accuracy_m: coords.acc,
-      device_id,
-      ua: navigator.userAgent,
-    } as const;
-
     const res = await fetch('/api/punch', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token ?? ''}`,
-      },
-      body: JSON.stringify(payload),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token ?? ''}` },
+      body: JSON.stringify({
+        type,
+        nip,
+        lat: coords.lat,
+        lng: coords.lng,
+        accuracy_m: coords.acc,
+        device_id,
+        ua: navigator.userAgent,
+      }),
     });
 
     const json = await res.json();
-    if (!json.ok) {
-      setMsg('Error: ' + json.error);
-      return;
-    }
+    if (!json.ok) { setMsg('Error: ' + json.error); return false; }
 
-    // Éxito → bloquear botón y guardar hora del servidor
     const serverTs: string = json.punch.ts;
-    setTodayTypes((prev) => (prev.includes(type) ? prev : [...prev, type]));
-    setTimes((prev) => ({ ...prev, [type]: fmtTimeIso(serverTs) }));
+    setTimes(prev => ({ ...prev, [type]: fmtTimeIso(serverTs) })); // hora del servidor
+    // Actualiza estado desde la BD para evitar cualquier desajuste
+    await loadToday();
     setMsg('¡Marcación registrada!');
+    return true;
   };
 
   const Row = ({ label, type }: { label: string; type: BtnType }) => (
