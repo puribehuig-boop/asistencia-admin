@@ -3,19 +3,18 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import JustifyModal from '@/components/JustifyModal';
 
-// Tipos
 type BtnPeriod = 'semana' | 'mes' | 'quincena' | 'personalizado';
 
 type Punch = {
   employee_id: string;
   type: 'start_day' | 'start_break' | 'end_break' | 'end_day';
-  ts: string;       // ISO
+  ts: string;
   workday: string;  // YYYY-MM-DD
 };
 
 type Schedule = {
   employee_id: string;
-  weekday: number; // 0..6 (Dom..Sáb)
+  weekday: number;
   start_time: string | null;
   break_start: string | null;
   break_end: string | null;
@@ -35,21 +34,17 @@ type Justif = {
 type Row = {
   employee_id: string;
   email: string;
-  day: string;  // YYYY-MM-DD
-  // Reales (ISO)
+  day: string;
   start_day?: string;
   start_break?: string;
   end_break?: string;
   end_day?: string;
-  // Teórico
   sched?: Pick<Schedule, 'start_time' | 'break_start' | 'break_end' | 'end_time' | 'timezone'>;
-  // Horas
-  hours_worked: number; // real en horas
-  theo_hours: number;   // teórico en horas
-  diff_hours: number;   // real - teórico
+  hours_worked: number;
+  theo_hours: number;
+  diff_hours: number;
 };
 
-// Utils
 const TZ = 'America/Mexico_City';
 const fmtTime = (iso?: string) =>
   iso ? new Date(iso).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' }) : '—';
@@ -74,7 +69,7 @@ const theoreticalHours = (s?: Row['sched']) => {
   const start = timeToMinutes(s.start_time)!;
   const end = timeToMinutes(s.end_time)!;
   let mins = end - start;
-  if (mins < 0) mins += 24 * 60; // por si cruza medianoche
+  if (mins < 0) mins += 24 * 60;
   const bs = timeToMinutes(s.break_start);
   const be = timeToMinutes(s.break_end);
   if (bs != null && be != null) {
@@ -85,33 +80,15 @@ const theoreticalHours = (s?: Row['sched']) => {
   return Math.max(0, mins) / 60;
 };
 
-// Periodos rápidos
-const toYMD = (d: Date) =>
-  new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-
-const startOfWeekMon = (d: Date) => {
-  const x = new Date(d);
-  const day = x.getDay(); // 0..6
-  const diff = (day === 0 ? -6 : 1 - day); // lunes
-  x.setDate(x.getDate() + diff);
-  x.setHours(0, 0, 0, 0);
-  return x;
-};
-const endOfWeekSun = (d: Date) => {
-  const start = startOfWeekMon(d);
-  const end = new Date(start);
-  end.setDate(start.getDate() + 6);
-  return end;
-};
+const toYMD = (d: Date) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+const startOfWeekMon = (d: Date) => { const x = new Date(d); const day = x.getDay(); const diff = (day === 0 ? -6 : 1 - day); x.setDate(x.getDate() + diff); x.setHours(0,0,0,0); return x; };
+const endOfWeekSun = (d: Date) => { const start = startOfWeekMon(d); const end = new Date(start); end.setDate(start.getDate() + 6); return end; };
 const startOfMonth = (d: Date) => new Date(d.getFullYear(), d.getMonth(), 1);
 const endOfMonth = (d: Date) => new Date(d.getFullYear(), d.getMonth() + 1, 0);
-const quincenaRange = (d: Date): [Date, Date] => {
-  const day = d.getDate();
-  if (day <= 15) return [new Date(d.getFullYear(), d.getMonth(), 1), new Date(d.getFullYear(), d.getMonth(), 15)];
-  return [new Date(d.getFullYear(), d.getMonth(), 16), endOfMonth(d)];
-};
+const quincenaRange = (d: Date): [Date, Date] => d.getDate() <= 15
+  ? [new Date(d.getFullYear(), d.getMonth(), 1), new Date(d.getFullYear(), d.getMonth(), 15)]
+  : [new Date(d.getFullYear(), d.getMonth(), 16), endOfMonth(d)];
 
-// Genera arreglo de días YYYY-MM-DD entre [from, to] inclusive
 const daysBetween = (fromYmd: string, toYmd: string): string[] => {
   if (!fromYmd || !toYmd) return [];
   const res: string[] = [];
@@ -122,142 +99,86 @@ const daysBetween = (fromYmd: string, toYmd: string): string[] => {
 };
 
 export default function AdminAsistencia() {
-  // Filtros / periodo
-  const [from, setFrom] = useState<string>('');
-  const [to, setTo] = useState<string>('');
+  const [from, setFrom] = useState<string>(''); const [to, setTo] = useState<string>('');
   const [period, setPeriod] = useState<BtnPeriod>('semana');
   const [emailFilter, setEmailFilter] = useState<string>('');
 
-  // Datos crudos
   const [raw, setRaw] = useState<Punch[]>([]);
   const [emails, setEmails] = useState<Map<string, string>>(new Map());
   const [schedMap, setSchedMap] = useState<Map<string, Schedule>>(new Map());
   const [employeesWithSched, setEmployeesWithSched] = useState<Set<string>>(new Set());
-  const [justMap, setJustMap] = useState<Map<string, Justif>>(new Map()); // key: emp-day-field
+  const [justMap, setJustMap] = useState<Map<string, Justif>>(new Map());
   const [msg, setMsg] = useState<string>('');
 
-  // Modal
   const [modalOpen, setModalOpen] = useState(false);
   const [modalInfo, setModalInfo] = useState<{ employee_id: string; email: string; day: string } | null>(null);
 
-  // Perfiles para mapear employee_id -> email
-  useEffect(() => {
-    (async () => {
-      const { data, error } = await supabase.from('profiles').select('id,email');
-      if (!error && data) setEmails(new Map<string, string>(data.map((p: any) => [p.id, p.email])));
-    })();
-  }, []);
+  useEffect(() => { (async () => {
+    const { data } = await supabase.from('profiles').select('id,email');
+    if (data) setEmails(new Map<string, string>(data.map((p: any) => [p.id, p.email])));
+  })(); }, []);
 
-  // Schedules (carga única)
-  useEffect(() => {
-    (async () => {
-      const { data, error } = await supabase
-        .from('work_schedules')
-        .select('employee_id,weekday,start_time,break_start,break_end,end_time,timezone');
-      if (!error && data) {
-        const m = new Map<string, Schedule>();
-        const empSet = new Set<string>();
-        (data as Schedule[]).forEach((s) => {
-          m.set(`${s.employee_id}-${s.weekday}`, s);
-          empSet.add(s.employee_id);
-        });
-        setSchedMap(m);
-        setEmployeesWithSched(empSet);
-      }
-    })();
-  }, []);
-
-  // Periodo por defecto
-  useEffect(() => {
-    const now = new Date();
-    setFrom(toYMD(startOfWeekMon(now)));
-    setTo(toYMD(endOfWeekSun(now)));
-  }, []);
-
-  const applyPeriod = (p: BtnPeriod) => {
-    setPeriod(p);
-    const now = new Date();
-    if (p === 'semana') {
-      setFrom(toYMD(startOfWeekMon(now)));
-      setTo(toYMD(endOfWeekSun(now)));
-    } else if (p === 'mes') {
-      setFrom(toYMD(startOfMonth(now)));
-      setTo(toYMD(endOfMonth(now)));
-    } else if (p === 'quincena') {
-      const [a, b] = quincenaRange(now);
-      setFrom(toYMD(a));
-      setTo(toYMD(b));
+  useEffect(() => { (async () => {
+    const { data } = await supabase.from('work_schedules')
+      .select('employee_id,weekday,start_time,break_start,break_end,end_time,timezone');
+    if (data) {
+      const m = new Map<string, Schedule>(); const empSet = new Set<string>();
+      (data as Schedule[]).forEach((s) => { m.set(`${s.employee_id}-${s.weekday}`, s); empSet.add(s.employee_id); });
+      setSchedMap(m); setEmployeesWithSched(empSet);
     }
+  })(); }, []);
+
+  useEffect(() => { const now = new Date(); setFrom(toYMD(startOfWeekMon(now))); setTo(toYMD(endOfWeekSun(now))); }, []);
+  const applyPeriod = (p: BtnPeriod) => { setPeriod(p); const now = new Date();
+    if (p==='semana'){ setFrom(toYMD(startOfWeekMon(now))); setTo(toYMD(endOfWeekSun(now))); }
+    else if(p==='mes'){ setFrom(toYMD(startOfMonth(now))); setTo(toYMD(endOfMonth(now))); }
+    else if(p==='quincena'){ const [a,b]=quincenaRange(now); setFrom(toYMD(a)); setTo(toYMD(b)); }
   };
 
   const load = async () => {
     setMsg('');
-    let q = supabase.from('punches').select('employee_id,type,ts,workday')
-      .order('workday', { ascending: true })
-      .order('ts', { ascending: true });
-    if (from) q = q.gte('workday', from);
-    if (to) q = q.lte('workday', to);
-    const { data, error } = await q;
-    if (error) { setMsg('Error: ' + error.message); return; }
+    let q = supabase.from('punches').select('employee_id,type,ts,workday').order('workday',{ascending:true}).order('ts',{ascending:true});
+    if (from) q = q.gte('workday', from); if (to) q = q.lte('workday', to);
+    const { data, error } = await q; if (error) { setMsg('Error: ' + error.message); return; }
     setRaw((data || []) as Punch[]);
     await loadJustifs(from, to);
   };
 
   const loadJustifs = async (f: string, t: string) => {
-    // status=approved dentro del rango
-    const { data, error } = await supabase
-      .from('justifications')
+    const { data } = await supabase.from('justifications')
       .select('employee_id,day,field,new_time,evidence_path,status')
-      .eq('status', 'approved')
-      .gte('day', f).lte('day', t);
-    if (error) return;
-    const m = new Map<string, Justif>();
-    (data || []).forEach((j: any) => {
-      const key = `${j.employee_id}-${j.day}-${j.field}`;
-      m.set(key, j as Justif);
-    });
+      .eq('status','approved').gte('day', f).lte('day', t);
+    const m = new Map<string, Justif>(); (data||[]).forEach((j:any)=>{ m.set(`${j.employee_id}-${j.day}-${j.field}`, j as Justif); });
     setJustMap(m);
   };
 
   useEffect(() => { void load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [from, to]);
 
-  // Agregación con teórico + faltas + APLICAR JUSTIFICACIONES
   const rows: Row[] = useMemo(() => {
     const byKey = new Map<string, Row>();
 
-    const applyOverride = (ymd: string, field: Row extends never ? never : 'start_day' | 'start_break' | 'end_break' | 'end_day', emp: string) => {
-      const j = justMap.get(`${emp}-${ymd}-${field}`); // HH:MM
+    const applyOverride = (ymd: string, field: 'start_day'|'start_break'|'end_break'|'end_day', emp: string) => {
+      const j = justMap.get(`${emp}-${ymd}-${field}`);
       if (!j?.new_time) return undefined;
-      // construye ISO local
-      return new Date(`${ymd}T${j.new_time}:00`);
+      const d = new Date(`${ymd}T${j.new_time}:00`);
+      return Number.isNaN(d.getTime()) ? undefined : d;
     };
 
-    // 1) a partir de punches
+    // 1) punches
     for (const p of raw) {
       const key = `${p.employee_id}-${p.workday}`;
       if (!byKey.has(key)) {
         const wd = new Date(p.workday + 'T00:00:00').getDay();
-        const sched = schedMap.get(`${p.employee_id}-${wd}`) || undefined;
+        const sched = schedMap.get(`${p.employee_id}-${wd}`);
+        const schedLite = sched ? {
+          start_time: sched.start_time, break_start: sched.break_start, break_end: sched.break_end,
+          end_time: sched.end_time, timezone: sched.timezone ?? TZ
+        } : undefined;
         byKey.set(key, {
-          employee_id: p.employee_id,
-          email: emails.get(p.employee_id) || p.employee_id,
-          day: p.workday,
+          employee_id: p.employee_id, email: emails.get(p.employee_id)||p.employee_id, day: p.workday,
           hours_worked: 0,
-          theo_hours: theoreticalHours(sched ? {
-            start_time: sched.start_time,
-            break_start: sched.break_start,
-            break_end: sched.break_end,
-            end_time: sched.end_time,
-            timezone: sched.timezone ?? TZ,
-          } : undefined),
-          diff_hours: 0,
-          sched: sched ? {
-            start_time: sched.start_time,
-            break_start: sched.break_start,
-            break_end: sched.break_end,
-            end_time: sched.end_time,
-            timezone: sched.timezone ?? TZ,
-          } : undefined,
+          theo_hours: theoreticalHours(schedLite),
+          diff_hours: 0, sched: schedLite,
         });
       }
       const r = byKey.get(key)!;
@@ -267,14 +188,12 @@ export default function AdminAsistencia() {
       else if (p.type === 'end_day') r.end_day = p.ts;
     }
 
-    // 2) faltas (sin punches, con horario)
+    // 2) faltas
     const days = daysBetween(from, to);
-    const employees = Array.from(employeesWithSched.values());
-    for (const empId of employees) {
+    for (const empId of Array.from(employeesWithSched.values())) {
       const email = emails.get(empId) || empId;
       for (const ymd of days) {
-        const key = `${empId}-${ymd}`;
-        if (byKey.has(key)) continue;
+        const key = `${empId}-${ymd}`; if (byKey.has(key)) continue;
         const wd = new Date(ymd + 'T00:00:00').getDay();
         const sched = schedMap.get(`${empId}-${wd}`);
         if (!sched || !sched.start_time || !sched.end_time) continue;
@@ -282,27 +201,17 @@ export default function AdminAsistencia() {
           start_time: sched.start_time, break_start: sched.break_start, break_end: sched.break_end,
           end_time: sched.end_time, timezone: sched.timezone ?? TZ
         };
-        const theo = theoreticalHours(schedLite);
-        if (theo <= 0) continue;
-        byKey.set(key, {
-          employee_id: empId, email, day: ymd,
-          hours_worked: 0, theo_hours: theo, diff_hours: -theo, sched: schedLite
-        });
+        const theo = theoreticalHours(schedLite); if (theo <= 0) continue;
+        byKey.set(key, { employee_id: empId, email, day: ymd, hours_worked: 0, theo_hours: theo, diff_hours: -theo, sched: schedLite });
       }
     }
 
-    // 3) aplicar JUSTIFICACIONES a cada fila
+    // 3) overrides
     for (const r of byKey.values()) {
-      // Sustituye los timestamps reales con los de justificación cuando existan
-      const sdOvr = applyOverride(r.day, 'start_day', r.employee_id);
-      const sbOvr = applyOverride(r.day, 'start_break', r.employee_id);
-      const ebOvr = applyOverride(r.day, 'end_break', r.employee_id);
-      const edOvr = applyOverride(r.day, 'end_day', r.employee_id);
-
-      const sd = sdOvr ? sdOvr : (r.start_day ? new Date(r.start_day) : undefined);
-      const sb = sbOvr ? sbOvr : (r.start_break ? new Date(r.start_break) : undefined);
-      const eb = ebOvr ? ebOvr : (r.end_break ? new Date(r.end_break) : undefined);
-      const ed = edOvr ? edOvr : (r.end_day ? new Date(r.end_day) : undefined);
+      const sd = applyOverride(r.day,'start_day',r.employee_id) ?? (r.start_day ? new Date(r.start_day) : undefined);
+      const sb = applyOverride(r.day,'start_break',r.employee_id) ?? (r.start_break ? new Date(r.start_break) : undefined);
+      const eb = applyOverride(r.day,'end_break',r.employee_id) ?? (r.end_break ? new Date(r.end_break) : undefined);
+      const ed = applyOverride(r.day,'end_day',r.employee_id) ?? (r.end_day ? new Date(r.end_day) : undefined);
 
       let totalMs = 0;
       if (sd && ed && ed > sd) {
@@ -311,90 +220,69 @@ export default function AdminAsistencia() {
       }
       r.hours_worked = totalMs / 3600000;
       r.diff_hours = r.hours_worked - r.theo_hours;
-      // Además, si aplicamos overrides, reflejamos las horas en UI:
-      r.start_day = sd ? sd.toISOString() : r.start_day;
-      r.start_break = sb ? sb.toISOString() : r.start_break;
-      r.end_break = eb ? eb.toISOString() : r.end_break;
-      r.end_day = ed ? ed.toISOString() : r.end_day;
+
+      // refleja en UI sólo si son válidas
+      if (sd && !Number.isNaN(sd.getTime())) r.start_day = sd.toISOString();
+      if (sb && !Number.isNaN(sb.getTime())) r.start_break = sb.toISOString();
+      if (eb && !Number.isNaN(eb.getTime())) r.end_break = eb.toISOString();
+      if (ed && !Number.isNaN(ed.getTime())) r.end_day = ed.toISOString();
     }
 
-    // 4) ordenar + filtro
-    let list = Array.from(byKey.values()).sort((a, b) =>
-      a.day === b.day ? a.email.localeCompare(b.email) : a.day.localeCompare(b.day)
-    );
+    let list = Array.from(byKey.values()).sort((a,b)=> a.day===b.day ? a.email.localeCompare(b.email) : a.day.localeCompare(b.day));
     if (emailFilter.trim()) {
-      const f = emailFilter.trim().toLowerCase();
-      list = list.filter((r) => r.email.toLowerCase().includes(f));
+      const f = emailFilter.trim().toLowerCase(); list = list.filter(r => r.email.toLowerCase().includes(f));
     }
     return list;
   }, [raw, emails, emailFilter, schedMap, from, to, employeesWithSched, justMap]);
 
-  // Resumen por empleado
   const summary = useMemo(() => {
     const agg = new Map<string, { email: string; real: number; theo: number; diff: number }>();
     for (const r of rows) {
       if (!agg.has(r.email)) agg.set(r.email, { email: r.email, real: 0, theo: 0, diff: 0 });
-      const a = agg.get(r.email)!;
-      a.real += r.hours_worked;
-      a.theo += r.theo_hours;
-      a.diff += r.diff_hours;
+      const a = agg.get(r.email)!; a.real += r.hours_worked; a.theo += r.theo_hours; a.diff += r.diff_hours;
     }
-    return Array.from(agg.values()).sort((x, y) => x.email.localeCompare(y.email));
+    return Array.from(agg.values()).sort((x,y)=>x.email.localeCompare(y.email));
   }, [rows]);
 
-  const openJustify = (r: Row) => {
-    setModalInfo({ employee_id: r.employee_id, email: r.email, day: r.day });
-    setModalOpen(true);
-  };
+  const openJustify = (r: Row) => { setModalInfo({ employee_id: r.employee_id, email: r.email, day: r.day }); setModalOpen(true); };
 
   return (
     <main className="space-y-4">
-      {/* Filtros / periodo */}
       <div className="grid grid-cols-1 md:grid-cols-6 gap-2">
-        <select
-          className="border p-2 rounded"
-          value={period}
-          onChange={(e) => { const p = e.target.value as BtnPeriod; if (p !== 'personalizado') applyPeriod(p); setPeriod(p); }}
-        >
+        <select className="border p-2 rounded" value={period} onChange={(e)=>{ const p=e.target.value as BtnPeriod; if(p!=='personalizado') applyPeriod(p); setPeriod(p); }}>
           <option value="semana">Semana actual</option>
           <option value="mes">Mes actual</option>
           <option value="quincena">Quincena actual</option>
           <option value="personalizado">Personalizado</option>
         </select>
-
-        <input className="border p-2 rounded" type="date" value={from} onChange={(e) => { setFrom(e.target.value); setPeriod('personalizado'); }} />
-        <input className="border p-2 rounded" type="date" value={to} onChange={(e) => { setTo(e.target.value); setPeriod('personalizado'); }} />
-        <input className="border p-2 rounded" placeholder="filtrar por email (opcional)" value={emailFilter} onChange={(e) => setEmailFilter(e.target.value)} />
+        <input className="border p-2 rounded" type="date" value={from} onChange={(e)=>{ setFrom(e.target.value); setPeriod('personalizado'); }} />
+        <input className="border p-2 rounded" type="date" value={to} onChange={(e)=>{ setTo(e.target.value); setPeriod('personalizado'); }} />
+        <input className="border p-2 rounded" placeholder="filtrar por email (opcional)" value={emailFilter} onChange={(e)=>setEmailFilter(e.target.value)} />
         <button className="border rounded px-3" onClick={load}>Aplicar filtros</button>
       </div>
 
-      {/* Resumen por empleado */}
       <section className="border rounded overflow-x-auto">
         <div className="p-3 font-semibold">Resumen por empleado (periodo seleccionado)</div>
         <table className="w-full text-sm">
           <thead>
             <tr className="bg-gray-100 text-left">
-              <th className="p-2">Email</th>
-              <th className="p-2">Horas Reales</th>
-              <th className="p-2">Horas Teóricas</th>
-              <th className="p-2">Diferencia</th>
+              <th className="p-2">Email</th><th className="p-2">Horas Reales</th><th className="p-2">Horas Teóricas</th><th className="p-2">Diferencia</th>
             </tr>
           </thead>
           <tbody>
-            {summary.map((s) => (
+            {summary.map((s)=>(
               <tr key={s.email} className="border-t">
                 <td className="p-2">{s.email}</td>
                 <td className="p-2">{s.real.toFixed(2)}</td>
                 <td className="p-2">{s.theo.toFixed(2)}</td>
-                <td className={`p-2 ${s.diff < 0 ? 'text-red-600' : s.diff > 0 ? 'text-green-700' : ''}`}>{s.diff.toFixed(2)}</td>
+                <td className={`p-2 ${s.diff<0?'text-red-600':s.diff>0?'text-green-700':''}`}>{s.diff.toFixed(2)}</td>
               </tr>
             ))}
-            {summary.length === 0 && <tr><td className="p-2" colSpan={4}>Sin datos.</td></tr>}
+            {summary.length===0 && <tr><td className="p-2" colSpan={4}>Sin datos.</td></tr>}
           </tbody>
         </table>
       </section>
 
-      {/* Tabla detallada diaria (incluye faltas + justificaciones) */}
       <section className="border rounded overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -413,7 +301,7 @@ export default function AdminAsistencia() {
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
+            {rows.map((r)=>(
               <tr key={`${r.employee_id}-${r.day}`} className="border-t">
                 <td className="p-2">{r.email}</td>
                 <td className="p-2">{r.day}</td>
@@ -424,24 +312,19 @@ export default function AdminAsistencia() {
                 <td className="p-2">{fmtTeorico(r.sched)}</td>
                 <td className="p-2">{r.hours_worked.toFixed(2)}</td>
                 <td className="p-2">{r.theo_hours.toFixed(2)}</td>
-                <td className={`p-2 ${r.diff_hours < 0 ? 'text-red-600' : r.diff_hours > 0 ? 'text-green-700' : ''}`}>
-                  {r.diff_hours.toFixed(2)}
-                </td>
+                <td className={`p-2 ${r.diff_hours<0?'text-red-600':r.diff_hours>0?'text-green-700':''}`}>{r.diff_hours.toFixed(2)}</td>
                 <td className="p-2">
-                  <button className="border rounded px-2 py-1" onClick={() => openJustify(r)}>
-                    Justificar
-                  </button>
+                  <button className="border rounded px-2 py-1" onClick={()=>openJustify(r)}>Justificar</button>
                 </td>
               </tr>
             ))}
-            {rows.length === 0 && <tr><td className="p-2" colSpan={11}>Sin datos.</td></tr>}
+            {rows.length===0 && <tr><td className="p-2" colSpan={11}>Sin datos.</td></tr>}
           </tbody>
         </table>
       </section>
 
       {msg && <p className="text-sm">{msg}</p>}
 
-      {/* Modal de justificación */}
       {modalOpen && modalInfo && (
         <JustifyModal
           open={modalOpen}
