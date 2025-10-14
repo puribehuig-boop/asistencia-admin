@@ -144,12 +144,30 @@ export default function AdminAsistencia() {
     await loadJustifs(from, to);
   };
 
+  // 🔁 AHORA CARGA LAS JUSTIFICACIONES DESDE EL ENDPOINT (Service Role)
   const loadJustifs = async (f: string, t: string) => {
-    const { data } = await supabase.from('justifications')
-      .select('employee_id,day,field,new_time,evidence_path,status')
-      .eq('status','approved').gte('day', f).lte('day', t);
-    const m = new Map<string, Justif>(); (data||[]).forEach((j:any)=>{ m.set(`${j.employee_id}-${j.day}-${j.field}`, j as Justif); });
-    setJustMap(m);
+    try {
+      const res = await fetch('/api/admin/justifications/list', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: f, to: t }),
+      });
+      const txt = await res.text();
+      let json: any = null; try { json = txt ? JSON.parse(txt) : null; } catch {}
+      if (!res.ok || !json?.ok) {
+        console.warn('Justifs fetch error:', json?.error || txt);
+        setJustMap(new Map()); // sin overrides
+        return;
+      }
+      const m = new Map<string, Justif>();
+      (json.items || []).forEach((j: any) => {
+        m.set(`${j.employee_id}-${j.day}-${j.field}`, j as Justif);
+      });
+      setJustMap(m);
+    } catch (e) {
+      console.warn('Justifs fetch failed:', e);
+      setJustMap(new Map());
+    }
   };
 
   useEffect(() => { void load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [from, to]);
@@ -221,7 +239,6 @@ export default function AdminAsistencia() {
       r.hours_worked = totalMs / 3600000;
       r.diff_hours = r.hours_worked - r.theo_hours;
 
-      // refleja en UI sólo si son válidas
       if (sd && !Number.isNaN(sd.getTime())) r.start_day = sd.toISOString();
       if (sb && !Number.isNaN(sb.getTime())) r.start_break = sb.toISOString();
       if (eb && !Number.isNaN(eb.getTime())) r.end_break = eb.toISOString();
@@ -264,11 +281,9 @@ export default function AdminAsistencia() {
       <section className="border rounded overflow-x-auto">
         <div className="p-3 font-semibold">Resumen por empleado (periodo seleccionado)</div>
         <table className="w-full text-sm">
-          <thead>
-            <tr className="bg-gray-100 text-left">
-              <th className="p-2">Email</th><th className="p-2">Horas Reales</th><th className="p-2">Horas Teóricas</th><th className="p-2">Diferencia</th>
-            </tr>
-          </thead>
+          <thead><tr className="bg-gray-100 text-left">
+            <th className="p-2">Email</th><th className="p-2">Horas Reales</th><th className="p-2">Horas Teóricas</th><th className="p-2">Diferencia</th>
+          </tr></thead>
           <tbody>
             {summary.map((s)=>(
               <tr key={s.email} className="border-t">
@@ -314,7 +329,9 @@ export default function AdminAsistencia() {
                 <td className="p-2">{r.theo_hours.toFixed(2)}</td>
                 <td className={`p-2 ${r.diff_hours<0?'text-red-600':r.diff_hours>0?'text-green-700':''}`}>{r.diff_hours.toFixed(2)}</td>
                 <td className="p-2">
-                  <button className="border rounded px-2 py-1" onClick={()=>openJustify(r)}>Justificar</button>
+                  <button className="border rounded px-2 py-1" onClick={()=>setModalInfo({ employee_id: r.employee_id, email: r.email, day: r.day }) || setModalOpen(true)}>
+                    Justificar
+                  </button>
                 </td>
               </tr>
             ))}
