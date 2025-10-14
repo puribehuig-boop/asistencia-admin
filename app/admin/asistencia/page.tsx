@@ -2,6 +2,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 
+// Tipos
+type BtnPeriod = 'semana' | 'mes' | 'quincena' | 'personalizado';
+
 type Punch = {
   employee_id: string;
   type: 'start_day' | 'start_break' | 'end_break' | 'end_day';
@@ -9,13 +12,13 @@ type Punch = {
   workday: string;  // YYYY-MM-DD
 };
 
-type WS = {
+type Schedule = {
   employee_id: string;
   weekday: number; // 0..6 (Dom..Sáb)
-  start_time?: string | null;
-  break_start?: string | null;
-  break_end?: string | null;
-  end_time?: string | null;
+  start_time: string | null;
+  break_start: string | null;
+  break_end: string | null;
+  end_time: string | null;
   timezone?: string | null;
 };
 
@@ -23,90 +26,99 @@ type Row = {
   employee_id: string;
   email: string;
   day: string;  // YYYY-MM-DD
-  // reales
+  // Reales (ISO)
   start_day?: string;
   start_break?: string;
   end_break?: string;
   end_day?: string;
-  hours_worked: number; // real (h)
-  // teóricos (del horario)
-  ws_start?: string | null;
-  ws_break_start?: string | null;
-  ws_break_end?: string | null;
-  ws_end?: string | null;
-  ws_hours: number; // teórico (h)
-  // diferencia (real - teórico)
-  diff_hours: number;
+  // Teórico (time string HH:MM[:SS])
+  sched?: Pick<Schedule, 'start_time' | 'break_start' | 'break_end' | 'end_time' | 'timezone'>;
+  // Horas
+  hours_worked: number; // real en horas
+  theo_hours: number;   // teórico en horas
+  diff_hours: number;   // real - teórico
 };
 
+// Utils
+const TZ = 'America/Mexico_City';
 const fmtTime = (iso?: string) =>
   iso ? new Date(iso).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' }) : '—';
 
-const fmtTeorico = (r: Row) => {
-  const core = r.ws_start && r.ws_end ? `${r.ws_start}–${r.ws_end}` : '—';
-  const brk =
-    r.ws_break_start && r.ws_break_end ? ` (Desc: ${r.ws_break_start}–${r.ws_break_end})` : '';
-  return core + brk;
+const fmtTeorico = (s?: Row['sched']) => {
+  if (!s?.start_time || !s.end_time) return '—';
+  const base = `${s.start_time.slice(0,5)}–${s.end_time.slice(0,5)}`;
+  const b = s.break_start?.slice(0,5);
+  const e = s.break_end?.slice(0,5);
+  return b && e ? `${base} (descanso ${b}–${e})` : base;
 };
 
-// HH:MM[:SS] -> minutos
 const timeToMinutes = (t?: string | null) => {
-  if (!t) return undefined;
-  const [hh, mm = '0', ss = '0'] = t.split(':');
-  const h = Number(hh), m = Number(mm), s = Number(ss);
-  if (Number.isNaN(h) || Number.isNaN(m) || Number.isNaN(s)) return undefined;
-  return h * 60 + m + Math.floor(s / 60);
+  if (!t) return null;
+  const [h, m] = t.split(':').map((x) => parseInt(x, 10));
+  if (Number.isNaN(h) || Number.isNaN(m)) return null;
+  return h * 60 + m;
 };
 
-const scheduleHours = (ws?: WS) => {
-  if (!ws?.start_time || !ws?.end_time) return 0;
-  const s = timeToMinutes(ws.start_time);
-  const e = timeToMinutes(ws.end_time);
-  if (s === undefined || e === undefined || e <= s) return 0;
-  let total = e - s;
-  const bs = timeToMinutes(ws.break_start);
-  const be = timeToMinutes(ws.break_end);
-  if (bs !== undefined && be !== undefined && be > bs) total -= (be - bs);
-  return total / 60; // horas
+const theoreticalHours = (s?: Row['sched']) => {
+  if (!s?.start_time || !s.end_time) return 0;
+  const start = timeToMinutes(s.start_time)!;
+  const end = timeToMinutes(s.end_time)!;
+  let mins = end - start;
+  if (mins < 0) mins += 24 * 60; // por si cruza medianoche (poco probable)
+  const bs = timeToMinutes(s.break_start);
+  const be = timeToMinutes(s.break_end);
+  if (bs != null && be != null) {
+    let rest = be - bs;
+    if (rest < 0) rest += 24 * 60;
+    mins -= rest;
+  }
+  return Math.max(0, mins) / 60;
 };
 
-type Period = 'semana' | 'mes' | 'quincena';
+// Periodos rápidos
+const toYMD = (d: Date) =>
+  new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 
-const periodKey = (dayISO: string, type: Period) => {
-  const d = new Date(dayISO + 'T00:00:00');
-  if (type === 'mes') {
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    return `${y}-${m}`;
+const startOfWeekMon = (d: Date) => {
+  const x = new Date(d);
+  const day = x.getDay(); // 0..6
+  const diff = (day === 0 ? -6 : 1 - day); // lunes
+  x.setDate(x.getDate() + diff);
+  x.setHours(0, 0, 0, 0);
+  return x;
+};
+
+const endOfWeekSun = (d: Date) => {
+  const start = startOfWeekMon(d);
+  const end = new Date(start);
+  end.setDate(start.getDate() + 6);
+  return end;
+};
+
+const startOfMonth = (d: Date) => new Date(d.getFullYear(), d.getMonth(), 1);
+const endOfMonth = (d: Date) => new Date(d.getFullYear(), d.getMonth() + 1, 0);
+
+const quincenaRange = (d: Date): [Date, Date] => {
+  const day = d.getDate();
+  if (day <= 15) {
+    return [new Date(d.getFullYear(), d.getMonth(), 1), new Date(d.getFullYear(), d.getMonth(), 15)];
+  } else {
+    return [new Date(d.getFullYear(), d.getMonth(), 16), endOfMonth(d)];
   }
-  if (type === 'quincena') {
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const q = d.getDate() <= 15 ? 'Q1' : 'Q2';
-    return `${y}-${m}-${q}`;
-  }
-  // semana ISO aproximada (simple; suficiente para nómina)
-  const ref = new Date(d);
-  const day = (d.getDay() + 6) % 7; // 0..6, 0=lunes
-  ref.setDate(d.getDate() - day);
-  const y = ref.getFullYear();
-  // número de semana: contar semanas desde el 1º de enero (lunes=0)
-  const jan1 = new Date(y, 0, 1);
-  const jan1Day = (jan1.getDay() + 6) % 7;
-  const diffDays = Math.floor((+ref - +jan1) / (1000 * 60 * 60 * 24));
-  const week = Math.floor((diffDays + jan1Day) / 7) + 1;
-  return `${y}-W${String(week).padStart(2, '0')}`;
 };
 
 export default function AdminAsistencia() {
+  // Filtros / periodo
   const [from, setFrom] = useState<string>('');
   const [to, setTo] = useState<string>('');
+  const [period, setPeriod] = useState<BtnPeriod>('semana');
   const [emailFilter, setEmailFilter] = useState<string>('');
+
+  // Datos crudos
   const [raw, setRaw] = useState<Punch[]>([]);
   const [emails, setEmails] = useState<Map<string, string>>(new Map());
-  const [schedules, setSchedules] = useState<WS[]>([]);
+  const [schedMap, setSchedMap] = useState<Map<string, Schedule>>(new Map());
   const [msg, setMsg] = useState<string>('');
-  const [period, setPeriod] = useState<Period>('semana');
 
   // Perfiles para mapear employee_id -> email
   useEffect(() => {
@@ -117,6 +129,48 @@ export default function AdminAsistencia() {
       }
     })();
   }, []);
+
+  // Schedules (una sola carga; si prefieres por empleado, podrías filtrar por IDs presentes)
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await supabase
+        .from('work_schedules')
+        .select('employee_id,weekday,start_time,break_start,break_end,end_time,timezone');
+      if (!error && data) {
+        const m = new Map<string, Schedule>();
+        (data as Schedule[]).forEach((s) => {
+          m.set(`${s.employee_id}-${s.weekday}`, s);
+        });
+        setSchedMap(m);
+      }
+    })();
+  }, []);
+
+  // Periodo por defecto: semana actual
+  useEffect(() => {
+    const now = new Date();
+    const a = startOfWeekMon(now);
+    const b = endOfWeekSun(now);
+    setFrom(toYMD(a));
+    setTo(toYMD(b));
+  }, []);
+
+  const applyPeriod = (p: BtnPeriod) => {
+    setPeriod(p);
+    const now = new Date();
+    if (p === 'semana') {
+      setFrom(toYMD(startOfWeekMon(now)));
+      setTo(toYMD(endOfWeekSun(now)));
+    } else if (p === 'mes') {
+      setFrom(toYMD(startOfMonth(now)));
+      setTo(toYMD(endOfMonth(now)));
+    } else if (p === 'quincena') {
+      const [a, b] = quincenaRange(now);
+      setFrom(toYMD(a));
+      setTo(toYMD(b));
+    }
+    // 'personalizado' no toca from/to
+  };
 
   const load = async () => {
     setMsg('');
@@ -129,44 +183,47 @@ export default function AdminAsistencia() {
     if (from) q = q.gte('workday', from);
     if (to) q = q.lte('workday', to);
 
-    const [{ data, error }, wsRes] = await Promise.all([
-      q,
-      supabase
-        .from('work_schedules')
-        .select('employee_id,weekday,start_time,break_start,break_end,end_time,timezone'),
-    ]);
-
-    if (error) { setMsg('Error: ' + error.message); return; }
+    const { data, error } = await q;
+    if (error) {
+      setMsg('Error: ' + error.message);
+      return;
+    }
     setRaw((data || []) as Punch[]);
-    setSchedules((wsRes.data || []) as WS[]);
   };
 
-  // inicial
-  useEffect(() => { void load(); }, []);
+  // Carga cuando cambian las fechas
+  useEffect(() => {
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [from, to]);
 
-  // Index de horarios por empleado+weekday
-  const wsIndex = useMemo(() => {
-    const m = new Map<string, WS>();
-    for (const ws of schedules) {
-      m.set(`${ws.employee_id}-${ws.weekday}`, ws);
-    }
-    return m;
-  }, [schedules]);
-
-  // Agregación por empleado + día e inyección de teóricos
+  // Agregación diaria con teórico
   const rows: Row[] = useMemo(() => {
     const byKey = new Map<string, Row>();
 
     for (const p of raw) {
       const key = `${p.employee_id}-${p.workday}`;
       if (!byKey.has(key)) {
+        // calcula weekday (0..6) del día de la fila
+        const wd = new Date(p.workday + 'T00:00:00').getDay();
+        const sched = schedMap.get(`${p.employee_id}-${wd}`) || undefined;
+
         byKey.set(key, {
           employee_id: p.employee_id,
           email: emails.get(p.employee_id) || p.employee_id,
           day: p.workday,
           hours_worked: 0,
-          ws_hours: 0,
+          theo_hours: theoreticalHours(sched),
           diff_hours: 0,
+          sched: sched
+            ? {
+                start_time: sched.start_time,
+                break_start: sched.break_start,
+                break_end: sched.break_end,
+                end_time: sched.end_time,
+                timezone: sched.timezone ?? TZ,
+              }
+            : undefined,
         });
       }
       const r = byKey.get(key)!;
@@ -176,9 +233,8 @@ export default function AdminAsistencia() {
       else if (p.type === 'end_day') r.end_day = p.ts;
     }
 
-    // calcula horas reales y teóricas + diferencia
+    // Calcula horas reales y diferencia
     for (const r of byKey.values()) {
-      // reales
       const sd = r.start_day ? new Date(r.start_day).getTime() : undefined;
       const ed = r.end_day ? new Date(r.end_day).getTime() : undefined;
       const sb = r.start_break ? new Date(r.start_break).getTime() : undefined;
@@ -187,21 +243,10 @@ export default function AdminAsistencia() {
       let totalMs = 0;
       if (sd && ed && ed > sd) {
         totalMs = ed - sd;
-        if (sb && eb && eb > sb) totalMs -= (eb - sb);
+        if (sb && eb && eb > sb) totalMs -= eb - sb;
       }
-      r.hours_worked = totalMs / (1000 * 60 * 60);
-
-      // teóricos (por weekday)
-      const weekday = new Date(r.day + 'T00:00:00').getDay(); // 0..6 (Dom..Sáb)
-      const ws = wsIndex.get(`${r.employee_id}-${weekday}`);
-      r.ws_start = ws?.start_time ?? null;
-      r.ws_break_start = ws?.break_start ?? null;
-      r.ws_break_end = ws?.break_end ?? null;
-      r.ws_end = ws?.end_time ?? null;
-      r.ws_hours = scheduleHours(ws);
-
-      // diferencia (real - teórico)
-      r.diff_hours = (r.hours_worked || 0) - (r.ws_hours || 0);
+      r.hours_worked = totalMs / 3600000;
+      r.diff_hours = r.hours_worked - r.theo_hours;
     }
 
     let list = Array.from(byKey.values()).sort((a, b) =>
@@ -214,41 +259,58 @@ export default function AdminAsistencia() {
     }
 
     return list;
-  }, [raw, emails, emailFilter, wsIndex]);
+  }, [raw, emails, emailFilter, schedMap]);
 
-  // Acumulados por empleado y periodo
-  const totals = useMemo(() => {
-    const byKey = new Map<string, { email: string; period: string; real: number; teorico: number; diff: number }>();
+  // Resumen por empleado del periodo seleccionado
+  const summary = useMemo(() => {
+    const agg = new Map<
+      string,
+      { email: string; real: number; theo: number; diff: number }
+    >();
     for (const r of rows) {
-      const k = `${r.email}__${periodKey(r.day, period)}`;
-      if (!byKey.has(k)) {
-        byKey.set(k, { email: r.email, period: periodKey(r.day, period), real: 0, teorico: 0, diff: 0 });
+      if (!agg.has(r.employee_id)) {
+        agg.set(r.employee_id, { email: r.email, real: 0, theo: 0, diff: 0 });
       }
-      const agg = byKey.get(k)!;
-      agg.real += r.hours_worked || 0;
-      agg.teorico += r.ws_hours || 0;
-      agg.diff = agg.real - agg.teorico;
+      const a = agg.get(r.employee_id)!;
+      a.real += r.hours_worked;
+      a.theo += r.theo_hours;
+      a.diff += r.diff_hours;
     }
-    return Array.from(byKey.values()).sort((a, b) =>
-      a.email === b.email ? a.period.localeCompare(b.period) : a.email.localeCompare(b.email)
-    );
-  }, [rows, period]);
+    return Array.from(agg.values()).sort((x, y) => x.email.localeCompare(y.email));
+  }, [rows]);
 
   return (
-    <main className="space-y-5">
-      {/* Filtros */}
+    <main className="space-y-4">
+      {/* Filtros / periodo */}
       <div className="grid grid-cols-1 md:grid-cols-6 gap-2">
+        <select
+          className="border p-2 rounded"
+          value={period}
+          onChange={(e) => applyPeriod(e.target.value as BtnPeriod)}
+        >
+          <option value="semana">Semana actual</option>
+          <option value="mes">Mes actual</option>
+          <option value="quincena">Quincena actual</option>
+          <option value="personalizado">Personalizado</option>
+        </select>
+
         <input
           className="border p-2 rounded"
           type="date"
           value={from}
-          onChange={(e) => setFrom(e.target.value)}
+          onChange={(e) => {
+            setFrom(e.target.value);
+            setPeriod('personalizado');
+          }}
         />
         <input
           className="border p-2 rounded"
           type="date"
           value={to}
-          onChange={(e) => setTo(e.target.value)}
+          onChange={(e) => {
+            setTo(e.target.value);
+            setPeriod('personalizado');
+          }}
         />
         <input
           className="border p-2 rounded"
@@ -256,34 +318,56 @@ export default function AdminAsistencia() {
           value={emailFilter}
           onChange={(e) => setEmailFilter(e.target.value)}
         />
-        <select
-          className="border p-2 rounded"
-          value={period}
-          onChange={(e) => setPeriod(e.target.value as Period)}
-          title="Periodo para acumulados"
-        >
-          <option value="semana">Semana</option>
-          <option value="mes">Mes</option>
-          <option value="quincena">Quincena</option>
-        </select>
         <button className="border rounded px-3" onClick={load}>
           Aplicar filtros
         </button>
       </div>
 
-      {/* Tabla diaria real vs teórico */}
-      <div className="border rounded overflow-x-auto">
+      {/* Resumen por empleado del periodo */}
+      <section className="border rounded overflow-x-auto">
+        <div className="p-3 font-semibold">Resumen por empleado (periodo seleccionado)</div>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-gray-100 text-left">
+              <th className="p-2">Email</th>
+              <th className="p-2">Horas Reales</th>
+              <th className="p-2">Horas Teóricas</th>
+              <th className="p-2">Diferencia</th>
+            </tr>
+          </thead>
+          <tbody>
+            {summary.map((s) => (
+              <tr key={s.email} className="border-t">
+                <td className="p-2">{s.email}</td>
+                <td className="p-2">{s.real.toFixed(2)}</td>
+                <td className="p-2">{s.theo.toFixed(2)}</td>
+                <td className={`p-2 ${s.diff < 0 ? 'text-red-600' : s.diff > 0 ? 'text-green-700' : ''}`}>
+                  {s.diff.toFixed(2)}
+                </td>
+              </tr>
+            ))}
+            {summary.length === 0 && (
+              <tr>
+                <td className="p-2" colSpan={4}>Sin datos.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </section>
+
+      {/* Tabla detallada diaria */}
+      <section className="border rounded overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="bg-gray-100 text-left">
               <th className="p-2">Email</th>
               <th className="p-2">Día</th>
-              <th className="p-2">Inicio (real)</th>
-              <th className="p-2">Descanso (real)</th>
-              <th className="p-2">Fin descanso (real)</th>
-              <th className="p-2">Fin (real)</th>
-              <th className="p-2">Horas (real)</th>
-              <th className="p-2">Teórico</th>
+              <th className="p-2">Inicio</th>
+              <th className="p-2">Descanso</th>
+              <th className="p-2">Fin descanso</th>
+              <th className="p-2">Fin</th>
+              <th className="p-2">Teórico (rango)</th>
+              <th className="p-2">Horas Reales</th>
               <th className="p-2">Horas Teóricas</th>
               <th className="p-2">Diferencia</th>
             </tr>
@@ -297,59 +381,21 @@ export default function AdminAsistencia() {
                 <td className="p-2">{fmtTime(r.start_break)}</td>
                 <td className="p-2">{fmtTime(r.end_break)}</td>
                 <td className="p-2">{fmtTime(r.end_day)}</td>
+                <td className="p-2">{fmtTeorico(r.sched)}</td>
                 <td className="p-2">{r.hours_worked.toFixed(2)}</td>
-                <td className="p-2">{fmtTeorico(r)}</td>
-                <td className="p-2">{r.ws_hours.toFixed(2)}</td>
-                <td className={`p-2 ${r.diff_hours < 0 ? 'text-red-600' : r.diff_hours > 0 ? 'text-green-600' : ''}`}>
+                <td className="p-2">{r.theo_hours.toFixed(2)}</td>
+                <td className={`p-2 ${r.diff_hours < 0 ? 'text-red-600' : r.diff_hours > 0 ? 'text-green-700' : ''}`}>
                   {r.diff_hours.toFixed(2)}
                 </td>
               </tr>
             ))}
             {rows.length === 0 && (
               <tr>
-                <td className="p-2" colSpan={10}>
-                  Sin datos.
-                </td>
+                <td className="p-2" colSpan={10}>Sin datos.</td>
               </tr>
             )}
           </tbody>
         </table>
-      </div>
-
-      {/* Acumulados por empleado */}
-      <section className="border rounded p-3 space-y-2">
-        <h3 className="font-semibold">Acumulados por empleado ({period})</h3>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-gray-100 text-left">
-                <th className="p-2">Email</th>
-                <th className="p-2">Periodo</th>
-                <th className="p-2">Horas (real)</th>
-                <th className="p-2">Horas Teóricas</th>
-                <th className="p-2">Diferencia</th>
-              </tr>
-            </thead>
-            <tbody>
-              {totals.map((t) => (
-                <tr key={`${t.email}-${t.period}`} className="border-t">
-                  <td className="p-2">{t.email}</td>
-                  <td className="p-2">{t.period}</td>
-                  <td className="p-2">{t.real.toFixed(2)}</td>
-                  <td className="p-2">{t.teorico.toFixed(2)}</td>
-                  <td className={`p-2 ${t.diff < 0 ? 'text-red-600' : t.diff > 0 ? 'text-green-600' : ''}`}>
-                    {t.diff.toFixed(2)}
-                  </td>
-                </tr>
-              ))}
-              {totals.length === 0 && (
-                <tr>
-                  <td className="p-2" colSpan={5}>Sin datos.</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
       </section>
 
       {msg && <p className="text-sm">{msg}</p>}
