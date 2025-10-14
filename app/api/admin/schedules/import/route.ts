@@ -1,12 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseService } from '@/lib/supabaseService';
 
+// Fuerza Node.js runtime y evita cache para poder leer envs de servidor
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 /**
  * Espera JSON: [{ email, weekday, start_time?, break_start?, break_end?, end_time?, timezone? }, ...]
  * Devuelve siempre JSON { ok: boolean, count?: number, error?: string }
  */
 export async function POST(req: NextRequest) {
   try {
+    // Validación temprana de env (mensajes claros)
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
+      return NextResponse.json({ ok: false, error: 'Falta NEXT_PUBLIC_SUPABASE_URL' }, { status: 500 });
+    }
+    if (!process.env.SUPABASE_SERVICE_ROLE) {
+      return NextResponse.json({ ok: false, error: 'Falta SUPABASE_SERVICE_ROLE' }, { status: 500 });
+    }
+
     let rows: any;
     try {
       rows = await req.json();
@@ -53,7 +66,6 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ ok: true, count: upserts.length });
   } catch (e: any) {
-    // Captura cualquier error inesperado y asegura JSON
     const msg = e?.message || String(e);
     return NextResponse.json({ ok: false, error: msg }, { status: 500 });
   }
