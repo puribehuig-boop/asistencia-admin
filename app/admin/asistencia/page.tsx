@@ -64,7 +64,7 @@ const theoreticalHours = (s?: Row['sched']) => {
   const start = timeToMinutes(s.start_time)!;
   const end = timeToMinutes(s.end_time)!;
   let mins = end - start;
-  if (mins < 0) mins += 24 * 60; // por si cruza medianoche (poco probable)
+  if (mins < 0) mins += 24 * 60; // por si cruza medianoche
   const bs = timeToMinutes(s.break_start);
   const be = timeToMinutes(s.break_end);
   if (bs != null && be != null) {
@@ -107,6 +107,18 @@ const quincenaRange = (d: Date): [Date, Date] => {
   }
 };
 
+// Genera arreglo de días YYYY-MM-DD entre [from, to] inclusive
+const daysBetween = (fromYmd: string, toYmd: string): string[] => {
+  if (!fromYmd || !toYmd) return [];
+  const res: string[] = [];
+  const a = new Date(fromYmd + 'T00:00:00');
+  const b = new Date(toYmd + 'T00:00:00');
+  for (let d = new Date(a); d <= b; d.setDate(d.getDate() + 1)) {
+    res.push(toYMD(d));
+  }
+  return res;
+};
+
 export default function AdminAsistencia() {
   // Filtros / periodo
   const [from, setFrom] = useState<string>('');
@@ -118,6 +130,7 @@ export default function AdminAsistencia() {
   const [raw, setRaw] = useState<Punch[]>([]);
   const [emails, setEmails] = useState<Map<string, string>>(new Map());
   const [schedMap, setSchedMap] = useState<Map<string, Schedule>>(new Map());
+  const [employeesWithSched, setEmployeesWithSched] = useState<Set<string>>(new Set());
   const [msg, setMsg] = useState<string>('');
 
   // Perfiles para mapear employee_id -> email
@@ -130,7 +143,7 @@ export default function AdminAsistencia() {
     })();
   }, []);
 
-  // Schedules (una sola carga; si prefieres por empleado, podrías filtrar por IDs presentes)
+  // Schedules (carga única; alimenta schedMap y set de empleados con horario)
   useEffect(() => {
     (async () => {
       const { data, error } = await supabase
@@ -138,10 +151,13 @@ export default function AdminAsistencia() {
         .select('employee_id,weekday,start_time,break_start,break_end,end_time,timezone');
       if (!error && data) {
         const m = new Map<string, Schedule>();
+        const empSet = new Set<string>();
         (data as Schedule[]).forEach((s) => {
           m.set(`${s.employee_id}-${s.weekday}`, s);
+          empSet.add(s.employee_id);
         });
         setSchedMap(m);
+        setEmployeesWithSched(empSet);
       }
     })();
   }, []);
@@ -184,27 +200,22 @@ export default function AdminAsistencia() {
     if (to) q = q.lte('workday', to);
 
     const { data, error } = await q;
-    if (error) {
-      setMsg('Error: ' + error.message);
-      return;
-    }
+    if (error) { setMsg('Error: ' + error.message); return; }
     setRaw((data || []) as Punch[]);
   };
 
   // Carga cuando cambian las fechas
-  useEffect(() => {
-    void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [from, to]);
+  useEffect(() => { void load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [from, to]);
 
-  // Agregación diaria con teórico
+  // Agregación diaria con teórico + ABSENCIAS (días sin punches con horario teórico)
   const rows: Row[] = useMemo(() => {
     const byKey = new Map<string, Row>();
 
+    // 1) Construir filas a partir de punches reales
     for (const p of raw) {
       const key = `${p.employee_id}-${p.workday}`;
       if (!byKey.has(key)) {
-        // calcula weekday (0..6) del día de la fila
+        // weekday del día
         const wd = new Date(p.workday + 'T00:00:00').getDay();
         const sched = schedMap.get(`${p.employee_id}-${wd}`) || undefined;
 
@@ -213,7 +224,17 @@ export default function AdminAsistencia() {
           email: emails.get(p.employee_id) || p.employee_id,
           day: p.workday,
           hours_worked: 0,
-          theo_hours: theoreticalHours(sched),
+          theo_hours: theoreticalHours(
+            sched
+              ? {
+                  start_time: sched.start_time,
+                  break_start: sched.break_start,
+                  break_end: sched.break_end,
+                  end_time: sched.end_time,
+                  timezone: sched.timezone ?? TZ,
+                }
+              : undefined
+          ),
           diff_hours: 0,
           sched: sched
             ? {
@@ -233,7 +254,7 @@ export default function AdminAsistencia() {
       else if (p.type === 'end_day') r.end_day = p.ts;
     }
 
-    // Calcula horas reales y diferencia
+    // 2) Calcular horas reales y diferencias para las filas ya existentes
     for (const r of byKey.values()) {
       const sd = r.start_day ? new Date(r.start_day).getTime() : undefined;
       const ed = r.end_day ? new Date(r.end_day).getTime() : undefined;
@@ -249,6 +270,48 @@ export default function AdminAsistencia() {
       r.diff_hours = r.hours_worked - r.theo_hours;
     }
 
+    // 3) GENERAR AUSENCIAS:
+    // Para cada empleado que tenga horario en algún día, y para cada fecha del rango,
+    // si ese día tiene un horario teórico y NO existe fila real, crear una fila con
+    // horas reales = 0, teóricas > 0, diferencia = -teóricas.
+    const days = daysBetween(from, to);
+    const employees = Array.from(employeesWithSched.values());
+
+    for (const empId of employees) {
+      const email = emails.get(empId) || empId;
+
+      for (const ymd of days) {
+        const key = `${empId}-${ymd}`;
+        if (byKey.has(key)) continue; // ya hay una fila real o parcial
+
+        const wd = new Date(ymd + 'T00:00:00').getDay();
+        const sched = schedMap.get(`${empId}-${wd}`);
+        if (!sched || !sched.start_time || !sched.end_time) continue; // sin horario ese día
+
+        const schedLite: Row['sched'] = {
+          start_time: sched.start_time,
+          break_start: sched.break_start,
+          break_end: sched.break_end,
+          end_time: sched.end_time,
+          timezone: sched.timezone ?? TZ,
+        };
+        const theo = theoreticalHours(schedLite);
+        if (theo <= 0) continue;
+
+        byKey.set(key, {
+          employee_id: empId,
+          email,
+          day: ymd,
+          hours_worked: 0,
+          theo_hours: theo,
+          diff_hours: 0 - theo,
+          sched: schedLite,
+          // sin start_day/end_day/etc → representa ausencia
+        });
+      }
+    }
+
+    // 4) Generar lista, aplicar filtro por email y ordenar
     let list = Array.from(byKey.values()).sort((a, b) =>
       a.day === b.day ? a.email.localeCompare(b.email) : a.day.localeCompare(b.day)
     );
@@ -259,19 +322,19 @@ export default function AdminAsistencia() {
     }
 
     return list;
-  }, [raw, emails, emailFilter, schedMap]);
+  }, [raw, emails, emailFilter, schedMap, from, to, employeesWithSched]);
 
-  // Resumen por empleado del periodo seleccionado
+  // Resumen por empleado del periodo seleccionado (incluye ausencias)
   const summary = useMemo(() => {
     const agg = new Map<
       string,
       { email: string; real: number; theo: number; diff: number }
     >();
     for (const r of rows) {
-      if (!agg.has(r.employee_id)) {
-        agg.set(r.employee_id, { email: r.email, real: 0, theo: 0, diff: 0 });
+      if (!agg.has(r.email)) {
+        agg.set(r.email, { email: r.email, real: 0, theo: 0, diff: 0 });
       }
-      const a = agg.get(r.employee_id)!;
+      const a = agg.get(r.email)!;
       a.real += r.hours_worked;
       a.theo += r.theo_hours;
       a.diff += r.diff_hours;
@@ -286,7 +349,13 @@ export default function AdminAsistencia() {
         <select
           className="border p-2 rounded"
           value={period}
-          onChange={(e) => applyPeriod(e.target.value as BtnPeriod)}
+          onChange={(e) => {
+            const p = e.target.value as BtnPeriod;
+            if (p !== 'personalizado') e.currentTarget.blur();
+            // aplica y mueve fechas
+            (p !== 'personalizado') && applyPeriod(p);
+            setPeriod(p);
+          }}
         >
           <option value="semana">Semana actual</option>
           <option value="mes">Mes actual</option>
@@ -355,7 +424,7 @@ export default function AdminAsistencia() {
         </table>
       </section>
 
-      {/* Tabla detallada diaria */}
+      {/* Tabla detallada diaria (incluye ausencias) */}
       <section className="border rounded overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
