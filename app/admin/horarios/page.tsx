@@ -25,7 +25,7 @@ type SchedRow = {
 
 const weekdays = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
 
-/** Parser CSV simple (soporta campos con comillas dobles básicas). */
+/** Parser CSV simple (soporta comillas dobles básicas). */
 function parseCsv(text: string): string[][] {
   const rows: string[][] = [];
   let field = '';
@@ -36,42 +36,24 @@ function parseCsv(text: string): string[][] {
     const c = text[i];
     if (inQuotes) {
       if (c === '"') {
-        if (text[i + 1] === '"') {
-          field += '"'; // comillas escapadas ""
-          i++;
-        } else {
-          inQuotes = false;
-        }
-      } else {
-        field += c;
-      }
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else { inQuotes = false; }
+      } else field += c;
     } else {
-      if (c === '"') {
-        inQuotes = true;
-      } else if (c === ',') {
-        row.push(field.trim());
-        field = '';
-      } else if (c === '\n') {
-        row.push(field.trim());
-        rows.push(row);
-        row = [];
-        field = '';
-      } else if (c === '\r') {
-        // ignora CR (manejado por \n)
-      } else {
-        field += c;
-      }
+      if (c === '"') inQuotes = true;
+      else if (c === ',') { row.push(field.trim()); field = ''; }
+      else if (c === '\n') { row.push(field.trim()); rows.push(row); row = []; field = ''; }
+      else if (c === '\r') { /* ignore */ }
+      else field += c;
     }
   }
-  if (field.length > 0 || row.length > 0) {
-    row.push(field.trim());
-    rows.push(row);
-  }
+  if (field.length > 0 || row.length > 0) { row.push(field.trim()); rows.push(row); }
   return rows.filter(r => r.length > 0 && r.some(x => x !== ''));
 }
 
 export default function AdminHorarios() {
   const [file, setFile] = useState<File | null>(null);
+  const [fileKey, setFileKey] = useState(0); // para resetear <input type="file" />
   const [uploading, setUploading] = useState(false);
   const [msg, setMsg] = useState<string>('');
   const [msgKind, setMsgKind] = useState<'success' | 'error' | ''>('');
@@ -80,8 +62,7 @@ export default function AdminHorarios() {
   const [loadingTable, setLoadingTable] = useState(false);
 
   const onFileChange: React.ChangeEventHandler<HTMLInputElement> = (e) => {
-    setMsg('');
-    setMsgKind('');
+    setMsg(''); setMsgKind('');
     setFile(e.target.files?.[0] ?? null);
   };
 
@@ -90,30 +71,19 @@ export default function AdminHorarios() {
     const sample = 'empleado@ejemplo.com,1,09:00,14:00,15:00,18:00,America/Mexico_City\n';
     const blob = new Blob([header + sample], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'horarios_template.csv';
-    a.click();
+    const a = document.createElement('a'); a.href = url; a.download = 'horarios_template.csv'; a.click();
     URL.revokeObjectURL(url);
   };
 
   const importCsv = async () => {
-    setMsg('');
-    setMsgKind('');
-    if (!file) {
-      setMsg('Selecciona un archivo CSV.');
-      setMsgKind('error');
-      return;
-    }
+    setMsg(''); setMsgKind('');
+    if (!file) { setMsg('Selecciona un archivo CSV.'); setMsgKind('error'); return; }
+
     setUploading(true);
     try {
       const text = await file.text();
       const rows = parseCsv(text);
-      if (rows.length < 2) {
-        setMsg('CSV vacío o sin filas de datos.');
-        setMsgKind('error');
-        return;
-      }
+      if (rows.length < 2) { setMsg('CSV vacío o sin filas de datos.'); setMsgKind('error'); return; }
 
       const header = rows[0].map(h => h.toLowerCase());
       const idx = (k: string) => header.indexOf(k);
@@ -127,8 +97,7 @@ export default function AdminHorarios() {
 
       if (iEmail < 0 || iW < 0) {
         setMsg('El CSV debe incluir al menos las columnas: email, weekday.');
-        setMsgKind('error');
-        return;
+        setMsgKind('error'); return;
       }
 
       const payload: UploadRow[] = rows.slice(1).map(cols => ({
@@ -140,33 +109,34 @@ export default function AdminHorarios() {
         end_time: (iE >= 0 ? cols[iE] : '') || null,
         timezone: (iTZ >= 0 ? cols[iTZ] : '') || 'America/Mexico_City',
       })).filter(r =>
-        r.email &&
-        Number.isFinite(r.weekday) &&
-        r.weekday >= 0 && r.weekday <= 6
+        r.email && Number.isFinite(r.weekday) && r.weekday >= 0 && r.weekday <= 6
       );
 
-      if (payload.length === 0) {
-        setMsg('No hay filas válidas para importar.');
-        setMsgKind('error');
-        return;
-      }
+      if (payload.length === 0) { setMsg('No hay filas válidas para importar.'); setMsgKind('error'); return; }
 
       const res = await fetch('/api/admin/schedules/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-      const json = await res.json();
-      if (!json.ok) {
-        setMsg('Error al importar: ' + (json.error ?? 'desconocido'));
+
+      // Robustez: intenta parsear JSON, pero maneja respuesta vacía/no-JSON
+      const rawText = await res.text();
+      let json: any = null;
+      try { json = rawText ? JSON.parse(rawText) : null; } catch { /* no JSON */ }
+
+      if (!res.ok || !json || json.ok === false) {
+        const errMsg = (json && json.error) ? json.error
+          : rawText?.slice(0, 200) || `Error HTTP ${res.status}`;
+        setMsg('Error al importar: ' + errMsg);
         setMsgKind('error');
         return;
       }
+
       setMsg(`Importación exitosa: ${json.count} filas.`);
       setMsgKind('success');
-      setFile(null);
-      // recargar tabla
-      await loadSchedules();
+      setFile(null); setFileKey(k => k + 1);
+      await loadSchedules(); // recargar tabla
     } catch (e: any) {
       setMsg('Error al leer CSV: ' + (e?.message || String(e)));
       setMsgKind('error');
@@ -177,12 +147,9 @@ export default function AdminHorarios() {
 
   const loadSchedules = async () => {
     setLoadingTable(true);
-    setMsg('');
-    setMsgKind('');
+    setMsg(''); setMsgKind('');
     try {
-      const { data: profs, error: e1 } = await supabase
-        .from('profiles')
-        .select('id,email');
+      const { data: profs, error: e1 } = await supabase.from('profiles').select('id,email');
       if (e1) throw new Error(e1.message);
       const mapEmail = new Map<string, string>((profs || []).map((p: any) => [p.id, p.email]));
 
@@ -229,6 +196,7 @@ export default function AdminHorarios() {
         </button>
 
         <input
+          key={fileKey}
           type="file"
           accept=".csv,text/csv"
           onChange={onFileChange}
