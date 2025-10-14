@@ -30,7 +30,7 @@ export default function JustifyModal({
 
     setBusy(true);
     try {
-      // 1) Sube evidencia (opcional) al servidor (usa Service Role)
+      // 1) Evidencia (opcional)
       let evidence_path: string | null = null;
       if (file) {
         const fd = new FormData();
@@ -42,12 +42,13 @@ export default function JustifyModal({
         const upText = await up.text();
         let upJson: any = null; try { upJson = upText ? JSON.parse(upText) : null; } catch {}
         if (!up.ok || !upJson?.ok) {
-          throw new Error(upJson?.error || upText || `Error al subir archivo (${up.status})`);
+          setMsg(upJson?.error || upText || `Error al subir archivo (${up.status})`);
+          return;
         }
         evidence_path = upJson.path as string;
       }
 
-      // 2) Crea la justificación + aplica corrección
+      // 2) Crear justificación
       const { data: { session } } = await supabase.auth.getSession();
       const created_by = session?.user?.id || null;
 
@@ -61,10 +62,13 @@ export default function JustifyModal({
       const raw = await res.text();
       let json: any = null; try { json = raw ? JSON.parse(raw) : null; } catch {}
       if (!res.ok || !json?.ok) {
-        throw new Error(json?.error || raw || `Error HTTP ${res.status}`);
+        setMsg(json?.error || raw || `Error HTTP ${res.status}`);
+        return;
       }
 
-      await onDone(); // recarga listas
+      // OK
+      setFile(null); setTime(''); setReason(''); setMsg('');
+      try { await onDone(); } catch {} // no rompas UI si falla el reload
       onClose();
     } catch (e: any) {
       setMsg(e?.message || String(e));
