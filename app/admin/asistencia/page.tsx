@@ -144,7 +144,7 @@ export default function AdminAsistencia() {
     await loadJustifs(from, to);
   };
 
-  // 🔁 AHORA CARGA LAS JUSTIFICACIONES DESDE EL ENDPOINT (Service Role)
+  // cargar justificaciones desde endpoint (Service Role)
   const loadJustifs = async (f: string, t: string) => {
     try {
       const res = await fetch('/api/admin/justifications/list', {
@@ -261,7 +261,10 @@ export default function AdminAsistencia() {
     return Array.from(agg.values()).sort((x,y)=>x.email.localeCompare(y.email));
   }, [rows]);
 
-  const openJustify = (r: Row) => { setModalInfo({ employee_id: r.employee_id, email: r.email, day: r.day }); setModalOpen(true); };
+  const openJustify = (r: Row) => {
+    setModalInfo({ employee_id: r.employee_id, email: r.email, day: r.day });
+    setModalOpen(true);
+  };
 
   return (
     <main className="space-y-4">
@@ -329,7 +332,7 @@ export default function AdminAsistencia() {
                 <td className="p-2">{r.theo_hours.toFixed(2)}</td>
                 <td className={`p-2 ${r.diff_hours<0?'text-red-600':r.diff_hours>0?'text-green-700':''}`}>{r.diff_hours.toFixed(2)}</td>
                 <td className="p-2">
-                  <button className="border rounded px-2 py-1" onClick={()=>setModalInfo({ employee_id: r.employee_id, email: r.email, day: r.day }) || setModalOpen(true)}>
+                  <button className="border rounded px-2 py-1" onClick={() => openJustify(r)}>
                     Justificar
                   </button>
                 </td>
