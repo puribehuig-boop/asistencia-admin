@@ -10,6 +10,8 @@ type Punch = {
   type: 'start_day' | 'start_break' | 'end_break' | 'end_day';
   ts: string;
   workday: string;  // YYYY-MM-DD
+  source: 'device' | 'justification' | 'manual';
+  created_at?: string;
 };
 
 type Schedule = {
@@ -88,7 +90,6 @@ const endOfMonth = (d: Date) => new Date(d.getFullYear(), d.getMonth() + 1, 0);
 const quincenaRange = (d: Date): [Date, Date] => d.getDate() <= 15
   ? [new Date(d.getFullYear(), d.getMonth(), 1), new Date(d.getFullYear(), d.getMonth(), 15)]
   : [new Date(d.getFullYear(), d.getMonth(), 16), endOfMonth(d)];
-
 const daysBetween = (fromYmd: string, toYmd: string): string[] => {
   if (!fromYmd || !toYmd) return [];
   const res: string[] = [];
@@ -97,6 +98,8 @@ const daysBetween = (fromYmd: string, toYmd: string): string[] => {
   for (let d = new Date(a); d <= b; d.setDate(d.getDate() + 1)) res.push(toYMD(d));
   return res;
 };
+
+const sourceRank = (s: Punch['source']) => (s === 'justification' ? 3 : s === 'manual' ? 2 : 1);
 
 export default function AdminAsistencia() {
   const [from, setFrom] = useState<string>(''); const [to, setTo] = useState<string>('');
@@ -107,7 +110,6 @@ export default function AdminAsistencia() {
   const [emails, setEmails] = useState<Map<string, string>>(new Map());
   const [schedMap, setSchedMap] = useState<Map<string, Schedule>>(new Map());
   const [employeesWithSched, setEmployeesWithSched] = useState<Set<string>>(new Set());
-  const [justMap, setJustMap] = useState<Map<string, Justif>>(new Map());
   const [msg, setMsg] = useState<string>('');
 
   const [modalOpen, setModalOpen] = useState(false);
@@ -137,81 +139,101 @@ export default function AdminAsistencia() {
 
   const load = async () => {
     setMsg('');
-    let q = supabase.from('punches').select('employee_id,type,ts,workday').order('workday',{ascending:true}).order('ts',{ascending:true});
+    let q = supabase.from('punches')
+      .select('employee_id,type,ts,workday,source,created_at')
+      .order('workday',{ascending:true})
+      .order('created_at',{ascending:true}); // luego resolveremos prioridad en memoria
     if (from) q = q.gte('workday', from); if (to) q = q.lte('workday', to);
     const { data, error } = await q; if (error) { setMsg('Error: ' + error.message); return; }
     setRaw((data || []) as Punch[]);
-    await loadJustifs(from, to);
-  };
-
-  // cargar justificaciones desde endpoint (Service Role)
-  const loadJustifs = async (f: string, t: string) => {
-    try {
-      const res = await fetch('/api/admin/justifications/list', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ from: f, to: t }),
-      });
-      const txt = await res.text();
-      let json: any = null; try { json = txt ? JSON.parse(txt) : null; } catch {}
-      if (!res.ok || !json?.ok) {
-        console.warn('Justifs fetch error:', json?.error || txt);
-        setJustMap(new Map()); // sin overrides
-        return;
-      }
-      const m = new Map<string, Justif>();
-      (json.items || []).forEach((j: any) => {
-        m.set(`${j.employee_id}-${j.day}-${j.field}`, j as Justif);
-      });
-      setJustMap(m);
-    } catch (e) {
-      console.warn('Justifs fetch failed:', e);
-      setJustMap(new Map());
-    }
   };
 
   useEffect(() => { void load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [from, to]);
 
   const rows: Row[] = useMemo(() => {
     const byKey = new Map<string, Row>();
-
-    const applyOverride = (ymd: string, field: 'start_day'|'start_break'|'end_break'|'end_day', emp: string) => {
-      const j = justMap.get(`${emp}-${ymd}-${field}`);
-      if (!j?.new_time) return undefined;
-      const d = new Date(`${ymd}T${j.new_time}:00`);
-      return Number.isNaN(d.getTime()) ? undefined : d;
+    // Acumuladores por día para elegir la marcación de mayor prioridad
+    type PerType = {
+      best?: { ts: string; src: Punch['source']; created_at?: string };
+    };
+    const choose = (cur: PerType['best'], cand: { ts: string; src: Punch['source']; created_at?: string }) => {
+      if (!cur) return cand;
+      const r1 = sourceRank(cur.src), r2 = sourceRank(cand.src);
+      if (r2 > r1) return cand;
+      if (r2 < r1) return cur;
+      // misma prioridad → el más reciente por created_at (o ts)
+      const c1 = cur.created_at ? Date.parse(cur.created_at) : Date.parse(cur.ts);
+      const c2 = cand.created_at ? Date.parse(cand.created_at) : Date.parse(cand.ts);
+      return c2 >= c1 ? cand : cur;
     };
 
-    // 1) punches
+    // 1) agrupar por empleado/día y escoger mejor marcación por tipo
+    const perEmpDay = new Map<string, { start_day?: PerType; start_break?: PerType; end_break?: PerType; end_day?: PerType }>();
     for (const p of raw) {
       const key = `${p.employee_id}-${p.workday}`;
-      if (!byKey.has(key)) {
-        const wd = new Date(p.workday + 'T00:00:00').getDay();
-        const sched = schedMap.get(`${p.employee_id}-${wd}`);
-        const schedLite = sched ? {
-          start_time: sched.start_time, break_start: sched.break_start, break_end: sched.break_end,
-          end_time: sched.end_time, timezone: sched.timezone ?? TZ
-        } : undefined;
-        byKey.set(key, {
-          employee_id: p.employee_id, email: emails.get(p.employee_id)||p.employee_id, day: p.workday,
-          hours_worked: 0,
-          theo_hours: theoreticalHours(schedLite),
-          diff_hours: 0, sched: schedLite,
-        });
-      }
-      const r = byKey.get(key)!;
-      if (p.type === 'start_day') r.start_day = p.ts;
-      else if (p.type === 'start_break') r.start_break = p.ts;
-      else if (p.type === 'end_break') r.end_break = p.ts;
-      else if (p.type === 'end_day') r.end_day = p.ts;
+      if (!perEmpDay.has(key)) perEmpDay.set(key, {});
+      const bag = perEmpDay.get(key)!;
+
+      const cand = { ts: p.ts, src: p.source, created_at: p.created_at };
+      if (p.type === 'start_day') bag.start_day = { best: choose(bag.start_day?.best, cand) };
+      else if (p.type === 'start_break') bag.start_break = { best: choose(bag.start_break?.best, cand) };
+      else if (p.type === 'end_break') bag.end_break = { best: choose(bag.end_break?.best, cand) };
+      else if (p.type === 'end_day') bag.end_day = { best: choose(bag.end_day?.best, cand) };
     }
 
-    // 2) faltas (sin punches pero con horario)
+    // 2) construir filas + horas teóricas (para diferencia)
+    for (const [key, bag] of perEmpDay.entries()) {
+      const [employee_id, day] = key.split('-') as [string, string];
+      const wd = new Date(day + 'T00:00:00').getDay();
+      const sched = schedMap.get(`${employee_id}-${wd}`);
+      const schedLite = sched ? {
+        start_time: sched.start_time, break_start: sched.break_start, break_end: sched.break_end,
+        end_time: sched.end_time, timezone: sched.timezone ?? TZ
+      } : undefined;
+
+      const row: Row = {
+        employee_id,
+        email: emails.get(employee_id) || employee_id,
+        day,
+        hours_worked: 0,
+        theo_hours: theoreticalHours(schedLite),
+        diff_hours: 0,
+        sched: schedLite,
+      };
+
+      // asigna los tiempos elegidos (si existen)
+      if (bag.start_day?.best) row.start_day = bag.start_day.best.ts;
+      if (bag.start_break?.best) row.start_break = bag.start_break.best.ts;
+      if (bag.end_break?.best) row.end_break = bag.end_break.best.ts;
+      if (bag.end_day?.best) row.end_day = bag.end_day.best.ts;
+
+      // cálculo real: si falta start o end → 0 horas (como pediste)
+      let totalMs = 0;
+      const sd = row.start_day ? new Date(row.start_day) : undefined;
+      const ed = row.end_day ? new Date(row.end_day) : undefined;
+      const sb = row.start_break ? new Date(row.start_break) : undefined;
+      const eb = row.end_break ? new Date(row.end_break) : undefined;
+
+      if (sd && ed && ed > sd) {
+        totalMs = ed.getTime() - sd.getTime();
+        if (sb && eb && eb > sb) totalMs -= (eb.getTime() - sb.getTime());
+      } else {
+        totalMs = 0;
+      }
+
+      row.hours_worked = Math.max(0, totalMs / 3600000);
+      row.diff_hours = row.hours_worked - row.theo_hours;
+
+      byKey.set(key, row);
+    }
+
+    // 3) también agrega faltas (días con horario y sin ninguna marcación)
     const days = daysBetween(from, to);
     for (const empId of Array.from(employeesWithSched.values())) {
       const email = emails.get(empId) || empId;
       for (const ymd of days) {
-        const key = `${empId}-${ymd}`; if (byKey.has(key)) continue;
+        const k = `${empId}-${ymd}`;
+        if (byKey.has(k)) continue;
         const wd = new Date(ymd + 'T00:00:00').getDay();
         const sched = schedMap.get(`${empId}-${wd}`);
         if (!sched || !sched.start_time || !sched.end_time) continue;
@@ -220,51 +242,17 @@ export default function AdminAsistencia() {
           end_time: sched.end_time, timezone: sched.timezone ?? TZ
         };
         const theo = theoreticalHours(schedLite); if (theo <= 0) continue;
-        byKey.set(key, { employee_id: empId, email, day: ymd, hours_worked: 0, theo_hours: theo, diff_hours: -theo, sched: schedLite });
+        byKey.set(k, { employee_id: empId, email, day: ymd, hours_worked: 0, theo_hours: theo, diff_hours: -theo, sched: schedLite });
       }
     }
 
-    // 3) aplicar JUSTIFICACIONES SOLO AL CAMPO INDICADO (sin usar horario teórico como pareja)
-    for (const r of byKey.values()) {
-      // Toma los reales existentes
-      let sd = r.start_day ? new Date(r.start_day) : undefined;
-      let sb = r.start_break ? new Date(r.start_break) : undefined;
-      let eb = r.end_break ? new Date(r.end_break) : undefined;
-      let ed = r.end_day ? new Date(r.end_day) : undefined;
-
-      // Aplica overrides SOLO al campo justificado (si existe)
-      sd = applyOverride(r.day,'start_day',r.employee_id) ?? sd;
-      sb = applyOverride(r.day,'start_break',r.employee_id) ?? sb;
-      eb = applyOverride(r.day,'end_break',r.employee_id) ?? eb;
-      ed = applyOverride(r.day,'end_day',r.employee_id) ?? ed;
-
-      // Cálculo de horas reales:
-      // - Si falta start o end -> horas = 0
-      // - Descanso solo descuenta si están ambas (start_break y end_break)
-      let totalMs = 0;
-      if (sd && ed && ed > sd) {
-        totalMs = ed.getTime() - sd.getTime();
-        if (sb && eb && eb > sb) totalMs -= (eb.getTime() - sb.getTime());
-      } else {
-        totalMs = 0; // regla solicitada: sin pareja de fin/inicio, cuenta 0
-      }
-
-      r.hours_worked = Math.max(0, totalMs / 3600000);
-      r.diff_hours = r.hours_worked - r.theo_hours;
-
-      // Reflejar en UI los campos que sí existan (reales u override)
-      if (sd && !Number.isNaN(sd.getTime())) r.start_day = sd.toISOString();
-      if (sb && !Number.isNaN(sb.getTime())) r.start_break = sb.toISOString();
-      if (eb && !Number.isNaN(eb.getTime())) r.end_break = eb.toISOString();
-      if (ed && !Number.isNaN(ed.getTime())) r.end_day = ed.toISOString();
-    }
-
+    // 4) ordenar + filtro
     let list = Array.from(byKey.values()).sort((a,b)=> a.day===b.day ? a.email.localeCompare(b.email) : a.day.localeCompare(b.day));
     if (emailFilter.trim()) {
       const f = emailFilter.trim().toLowerCase(); list = list.filter(r => r.email.toLowerCase().includes(f));
     }
     return list;
-  }, [raw, emails, emailFilter, schedMap, from, to, employeesWithSched, justMap]);
+  }, [raw, emails, emailFilter, schedMap, from, to, employeesWithSched]);
 
   const summary = useMemo(() => {
     const agg = new Map<string, { email: string; real: number; theo: number; diff: number }>();
@@ -302,7 +290,7 @@ export default function AdminAsistencia() {
             <th className="p-2">Email</th><th className="p-2">Horas Reales</th><th className="p-2">Horas Teóricas</th><th className="p-2">Diferencia</th>
           </tr></thead>
           <tbody>
-            {summary.map((s)=>(
+            {Array.from(summary).map((s)=>(
               <tr key={s.email} className="border-t">
                 <td className="p-2">{s.email}</td>
                 <td className="p-2">{s.real.toFixed(2)}</td>
