@@ -24,15 +24,6 @@ type Schedule = {
   timezone?: string | null;
 };
 
-type Justif = {
-  employee_id: string;
-  day: string; // YYYY-MM-DD
-  field: 'start_day' | 'start_break' | 'end_break' | 'end_day';
-  new_time: string; // HH:MM
-  evidence_path?: string | null;
-  status: 'approved' | 'pending' | 'rejected';
-};
-
 type Row = {
   employee_id: string;
   email: string;
@@ -48,6 +39,8 @@ type Row = {
 };
 
 const TZ = 'America/Mexico_City';
+const KEY_SEP = '||'; // <— separador seguro para claves compuestas
+
 const fmtTime = (iso?: string) =>
   iso ? new Date(iso).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' }) : '—';
 
@@ -142,7 +135,7 @@ export default function AdminAsistencia() {
     let q = supabase.from('punches')
       .select('employee_id,type,ts,workday,source,created_at')
       .order('workday',{ascending:true})
-      .order('created_at',{ascending:true}); // luego resolveremos prioridad en memoria
+      .order('created_at',{ascending:true});
     if (from) q = q.gte('workday', from); if (to) q = q.lte('workday', to);
     const { data, error } = await q; if (error) { setMsg('Error: ' + error.message); return; }
     setRaw((data || []) as Punch[]);
@@ -152,7 +145,7 @@ export default function AdminAsistencia() {
 
   const rows: Row[] = useMemo(() => {
     const byKey = new Map<string, Row>();
-    // Acumuladores por día para elegir la marcación de mayor prioridad
+
     type PerType = {
       best?: { ts: string; src: Punch['source']; created_at?: string };
     };
@@ -161,16 +154,15 @@ export default function AdminAsistencia() {
       const r1 = sourceRank(cur.src), r2 = sourceRank(cand.src);
       if (r2 > r1) return cand;
       if (r2 < r1) return cur;
-      // misma prioridad → el más reciente por created_at (o ts)
       const c1 = cur.created_at ? Date.parse(cur.created_at) : Date.parse(cur.ts);
       const c2 = cand.created_at ? Date.parse(cand.created_at) : Date.parse(cand.ts);
       return c2 >= c1 ? cand : cur;
     };
 
-    // 1) agrupar por empleado/día y escoger mejor marcación por tipo
+    // 1) Agrupar por empleado/día y escoger mejor marcación por tipo
     const perEmpDay = new Map<string, { start_day?: PerType; start_break?: PerType; end_break?: PerType; end_day?: PerType }>();
     for (const p of raw) {
-      const key = `${p.employee_id}-${p.workday}`;
+      const key = `${p.employee_id}${KEY_SEP}${p.workday}`; // <— usar separador seguro
       if (!perEmpDay.has(key)) perEmpDay.set(key, {});
       const bag = perEmpDay.get(key)!;
 
@@ -181,9 +173,10 @@ export default function AdminAsistencia() {
       else if (p.type === 'end_day') bag.end_day = { best: choose(bag.end_day?.best, cand) };
     }
 
-    // 2) construir filas + horas teóricas (para diferencia)
+    // 2) construir filas + horas teóricas
     for (const [key, bag] of perEmpDay.entries()) {
-      const [employee_id, day] = key.split('-') as [string, string];
+      const [employee_id, day] = key.split(KEY_SEP) as [string, string]; // <— split seguro
+
       const wd = new Date(day + 'T00:00:00').getDay();
       const sched = schedMap.get(`${employee_id}-${wd}`);
       const schedLite = sched ? {
@@ -201,13 +194,11 @@ export default function AdminAsistencia() {
         sched: schedLite,
       };
 
-      // asigna los tiempos elegidos (si existen)
       if (bag.start_day?.best) row.start_day = bag.start_day.best.ts;
       if (bag.start_break?.best) row.start_break = bag.start_break.best.ts;
       if (bag.end_break?.best) row.end_break = bag.end_break.best.ts;
       if (bag.end_day?.best) row.end_day = bag.end_day.best.ts;
 
-      // cálculo real: si falta start o end → 0 horas (como pediste)
       let totalMs = 0;
       const sd = row.start_day ? new Date(row.start_day) : undefined;
       const ed = row.end_day ? new Date(row.end_day) : undefined;
@@ -224,15 +215,15 @@ export default function AdminAsistencia() {
       row.hours_worked = Math.max(0, totalMs / 3600000);
       row.diff_hours = row.hours_worked - row.theo_hours;
 
-      byKey.set(key, row);
+      byKey.set(key, row); // <— misma clave con KEY_SEP
     }
 
-    // 3) también agrega faltas (días con horario y sin ninguna marcación)
+    // 3) Agregar faltas (días con horario y sin marcaciones)
     const days = daysBetween(from, to);
     for (const empId of Array.from(employeesWithSched.values())) {
       const email = emails.get(empId) || empId;
       for (const ymd of days) {
-        const k = `${empId}-${ymd}`;
+        const k = `${empId}${KEY_SEP}${ymd}`; // <— usar KEY_SEP aquí también
         if (byKey.has(k)) continue;
         const wd = new Date(ymd + 'T00:00:00').getDay();
         const sched = schedMap.get(`${empId}-${wd}`);
@@ -322,7 +313,7 @@ export default function AdminAsistencia() {
           </thead>
           <tbody>
             {rows.map((r)=>(
-              <tr key={`${r.employee_id}-${r.day}`} className="border-t">
+              <tr key={`${r.employee_id}||${r.day}`} className="border-t">
                 <td className="p-2">{r.email}</td>
                 <td className="p-2">{r.day}</td>
                 <td className="p-2">{fmtTime(r.start_day)}</td>
