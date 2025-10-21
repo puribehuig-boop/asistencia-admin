@@ -8,7 +8,7 @@ export const revalidate = 0;
 function weekdayToIndex(raw: string): number {
   const v = (raw || '').trim().toLowerCase();
   const map: Record<string, number> = {
-    '0': 0, '7': 0, // domingo también puede venir como 7
+    '0': 0, '7': 0,
     'domingo': 0, 'dom': 0, 'sun': 0, 'sunday': 0,
     '1': 1, 'lunes': 1, 'lun': 1, 'mon': 1, 'monday': 1,
     '2': 2, 'martes': 2, 'mar': 2, 'tue': 2, 'tuesday': 2,
@@ -27,62 +27,78 @@ function weekdayToIndex(raw: string): number {
 }
 
 // CSV esperado: email,weekday,start_time,break_start,break_end,end_time,timezone
-// Ejemplo de fila: juan@acme.com,domingo,09:00,14:00,15:00,18:00,America/Mexico_City
 export async function POST(req: NextRequest) {
   try {
-    const form = await req.formData();
-    const file = form.get('file') as File | null;
-    if (!file) {
-      return NextResponse.json({ ok: false, error: 'Falta archivo CSV (file)' }, { status: 400 });
+    const ct = (req.headers.get('content-type') || '').toLowerCase();
+    let csvText: string | null = null;
+
+    if (ct.includes('multipart/form-data') || ct.includes('application/x-www-form-urlencoded')) {
+      const form = await req.formData();
+      const file = form.get('file') as File | null;
+      if (file) {
+        csvText = await file.text();
+      } else {
+        const csv = form.get('csv');
+        if (typeof csv === 'string') csvText = csv;
+      }
+    } else if (ct.includes('text/csv')) {
+      csvText = await req.text();
+    } else if (ct.includes('application/json')) {
+      const body = await req.json();
+      if (typeof body?.csv === 'string') csvText = body.csv as string;
+    } else {
+      // Intento tolerante: si no hay CT, pruebo leer como texto
+      const maybe = await req.text();
+      csvText = maybe && maybe.trim().length ? maybe : null;
     }
 
-    const text = await file.text();
-    const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+    if (!csvText) {
+      return NextResponse.json(
+        { ok: false, error: 'Falta CSV. Envia como multipart/form-data (file) o text/csv o JSON {csv}.' },
+        { status: 400 }
+      );
+    }
+
+    const lines = csvText.split(/\r?\n/).filter(l => l.trim().length > 0);
     if (lines.length === 0) {
       return NextResponse.json({ ok: false, error: 'CSV vacío' }, { status: 400 });
     }
 
-    // Si trae encabezado, intentamos detectarlo (empieza con "email" casi siempre)
+    // Detectar encabezado
     let startIdx = 0;
     if (/^"?email"?[,;]/i.test(lines[0])) startIdx = 1;
 
     const s = supabaseService();
 
-    // Cache de email -> id
+    // Cache email -> id
     const emailToId = new Map<string, string>();
-
     const results: Array<{ email: string; weekday: number; status: 'inserted' | 'updated' }> = [];
+
     for (let i = startIdx; i < lines.length; i++) {
       const raw = lines[i].trim();
       if (!raw) continue;
 
-      // split simple por coma; si tu CSV puede traer comillas/commas embebidas, podemos cambiar a PapaParse
+      // Split sencillo por coma (si llegan comas escapadas, podemos cambiar a PapaParse)
       const parts = raw.split(',').map(x => x.trim());
       const [email, weekdayRaw, start_time, break_start, break_end, end_time, timezone] = parts;
 
-      if (!email || !weekdayRaw) {
-        // saltar fila inválida
-        continue;
-      }
+      if (!email || !weekdayRaw) continue;
 
+      // Buscar profile
       let employee_id = emailToId.get(email);
       if (!employee_id) {
         const q = await s.from('profiles').select('id').eq('email', email).maybeSingle();
         if (q.error && q.error.code !== 'PGRST116') {
           return NextResponse.json({ ok: false, error: `Fila ${i + 1}: ${q.error.message}` }, { status: 400 });
         }
-        if (!q.data?.id) {
-          // si no existe profile para ese email, salta la fila (o crea uno si así lo decides)
-          continue;
-        }
+        if (!q.data?.id) continue; // omitir si no hay perfil
         employee_id = q.data.id as string;
         emailToId.set(email, employee_id);
       }
 
       let weekday = 0;
-      try {
-        weekday = weekdayToIndex(weekdayRaw);
-      } catch (e: any) {
+      try { weekday = weekdayToIndex(weekdayRaw); }
+      catch (e: any) {
         return NextResponse.json({ ok: false, error: `Fila ${i + 1}: ${e?.message || e}` }, { status: 400 });
       }
 
