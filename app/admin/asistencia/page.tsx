@@ -206,7 +206,7 @@ export default function AdminAsistencia() {
       else if (p.type === 'end_day') r.end_day = p.ts;
     }
 
-    // 2) faltas
+    // 2) faltas (sin punches pero con horario)
     const days = daysBetween(from, to);
     for (const empId of Array.from(employeesWithSched.values())) {
       const email = emails.get(empId) || empId;
@@ -224,21 +224,35 @@ export default function AdminAsistencia() {
       }
     }
 
-    // 3) overrides
+    // 3) aplicar JUSTIFICACIONES SOLO AL CAMPO INDICADO (sin usar horario teórico como pareja)
     for (const r of byKey.values()) {
-      const sd = applyOverride(r.day,'start_day',r.employee_id) ?? (r.start_day ? new Date(r.start_day) : undefined);
-      const sb = applyOverride(r.day,'start_break',r.employee_id) ?? (r.start_break ? new Date(r.start_break) : undefined);
-      const eb = applyOverride(r.day,'end_break',r.employee_id) ?? (r.end_break ? new Date(r.end_break) : undefined);
-      const ed = applyOverride(r.day,'end_day',r.employee_id) ?? (r.end_day ? new Date(r.end_day) : undefined);
+      // Toma los reales existentes
+      let sd = r.start_day ? new Date(r.start_day) : undefined;
+      let sb = r.start_break ? new Date(r.start_break) : undefined;
+      let eb = r.end_break ? new Date(r.end_break) : undefined;
+      let ed = r.end_day ? new Date(r.end_day) : undefined;
 
+      // Aplica overrides SOLO al campo justificado (si existe)
+      sd = applyOverride(r.day,'start_day',r.employee_id) ?? sd;
+      sb = applyOverride(r.day,'start_break',r.employee_id) ?? sb;
+      eb = applyOverride(r.day,'end_break',r.employee_id) ?? eb;
+      ed = applyOverride(r.day,'end_day',r.employee_id) ?? ed;
+
+      // Cálculo de horas reales:
+      // - Si falta start o end -> horas = 0
+      // - Descanso solo descuenta si están ambas (start_break y end_break)
       let totalMs = 0;
       if (sd && ed && ed > sd) {
         totalMs = ed.getTime() - sd.getTime();
         if (sb && eb && eb > sb) totalMs -= (eb.getTime() - sb.getTime());
+      } else {
+        totalMs = 0; // regla solicitada: sin pareja de fin/inicio, cuenta 0
       }
-      r.hours_worked = totalMs / 3600000;
+
+      r.hours_worked = Math.max(0, totalMs / 3600000);
       r.diff_hours = r.hours_worked - r.theo_hours;
 
+      // Reflejar en UI los campos que sí existan (reales u override)
       if (sd && !Number.isNaN(sd.getTime())) r.start_day = sd.toISOString();
       if (sb && !Number.isNaN(sb.getTime())) r.start_break = sb.toISOString();
       if (eb && !Number.isNaN(eb.getTime())) r.end_break = eb.toISOString();
@@ -332,7 +346,10 @@ export default function AdminAsistencia() {
                 <td className="p-2">{r.theo_hours.toFixed(2)}</td>
                 <td className={`p-2 ${r.diff_hours<0?'text-red-600':r.diff_hours>0?'text-green-700':''}`}>{r.diff_hours.toFixed(2)}</td>
                 <td className="p-2">
-                  <button className="border rounded px-2 py-1" onClick={() => openJustify(r)}>
+                  <button className="border rounded px-2 py-1" onClick={() => {
+                    setModalInfo({ employee_id: r.employee_id, email: r.email, day: r.day });
+                    setModalOpen(true);
+                  }}>
                     Justificar
                   </button>
                 </td>
