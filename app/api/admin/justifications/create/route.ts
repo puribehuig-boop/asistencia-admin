@@ -44,34 +44,60 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: ins.error.message }, { status: 400 });
     }
 
-    // 2) Refleja la justificación como "marcación" en punches (source='justification')
-    //    Construimos un timestamp con zona de CDMX. México eliminó DST en CDMX, offset ~ -06:00.
+    // 2) Refleja la justificación como "punch" (source='justification'), upsert MANUAL
     const day = String(body.day);
     const hhmm = String(body.new_time);
     const type = String(body.field) as 'start_day'|'start_break'|'end_break'|'end_day';
     const employee_id = String(body.employee_id);
 
-    // ISO con offset -06:00 para evitar derivar a UTC sin control
+    // Guardamos como hora local CDMX (offset fijo -06:00 para este proyecto)
     const ts = `${day}T${hhmm}:00-06:00`;
 
-    const up = await s
+    // ¿Existe ya un punch de justificación para (empleado, día, tipo)?
+    const existing = await s
       .from('punches')
-      .upsert(
-        {
+      .select('id')
+      .eq('employee_id', employee_id)
+      .eq('workday', day)
+      .eq('type', type)
+      .eq('source', 'justification')
+      .maybeSingle();
+
+    if (existing.error && existing.error.code !== 'PGRST116') {
+      // PGRST116 = No rows found for maybeSingle (ok)
+      return NextResponse.json({ ok: false, error: existing.error.message }, { status: 400 });
+    }
+
+    if (existing.data?.id) {
+      // UPDATE
+      const upd = await s
+        .from('punches')
+        .update({ ts })
+        .eq('id', existing.data.id)
+        .select('id')
+        .single();
+      if (upd.error) {
+        return NextResponse.json({ ok: false, error: upd.error.message }, { status: 400 });
+      }
+      return NextResponse.json({ ok: true, punch_id: upd.data.id, mode: 'updated' });
+    } else {
+      // INSERT
+      const insPunch = await s
+        .from('punches')
+        .insert({
           employee_id,
           workday: day,
           type,
           ts,
           source: 'justification',
-        },
-        { onConflict: 'employee_id,workday,type,source' }
-      )
-      .select('id');
-    if (up.error) {
-      return NextResponse.json({ ok: false, error: up.error.message }, { status: 400 });
+        })
+        .select('id')
+        .single();
+      if (insPunch.error) {
+        return NextResponse.json({ ok: false, error: insPunch.error.message }, { status: 400 });
+      }
+      return NextResponse.json({ ok: true, punch_id: insPunch.data.id, mode: 'inserted' });
     }
-
-    return NextResponse.json({ ok: true, punch_upserted: up.data?.[0]?.id ?? null });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
   }
